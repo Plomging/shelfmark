@@ -30,6 +30,7 @@ KNOWN_TOKENS = [
     "title",
     "year",
     "user",
+    "isbn",
 ]
 
 # Authors reach naming already joined as "First Author, Second Author, ...".

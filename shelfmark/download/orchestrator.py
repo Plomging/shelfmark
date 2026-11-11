@@ -296,6 +296,7 @@ def queue_release(
         subtitle = release_data.get("subtitle") or extra.get("subtitle")
         narrator = release_data.get("narrator") or extra.get("narrator")
         language = release_data.get("language") or extra.get("language")
+        isbn = release_data.get("isbn") or extra.get("isbn")
         multi_book = bool(release_data.get("multi_book") or extra.get("multi_book"))
         book_plan = _normalize_book_plan(release_data.get("book_plan") or extra.get("book_plan"))
         ignored_files = _normalize_ignored_files(
@@ -338,6 +339,7 @@ def queue_release(
             subtitle=subtitle,
             narrator=narrator if isinstance(narrator, str) and narrator.strip() else None,
             language=language,
+            isbn=isbn if isinstance(isbn, str) and isbn.strip() else None,
             multi_book=multi_book or book_plan is not None,
             book_plan=book_plan,
             ignored_files=ignored_files,
@@ -572,6 +574,7 @@ def serialize_task_for_retry(task: DownloadTask) -> dict[str, Any]:
         "subtitle": getattr(task, "subtitle", None),
         "narrator": getattr(task, "narrator", None),
         "language": getattr(task, "language", None),
+        "isbn": getattr(task, "isbn", None),
         "search_mode": search_mode,
         "multi_book": bool(getattr(task, "multi_book", False)),
         "book_plan": _normalize_book_plan(getattr(task, "book_plan", None)),
@@ -635,6 +638,7 @@ def _restore_task_from_retry_payload(payload: object) -> DownloadTask | None:
         subtitle=normalize_optional_text(payload.get("subtitle")),
         narrator=normalize_optional_text(payload.get("narrator")),
         language=normalize_optional_text(payload.get("language")),
+        isbn=normalize_optional_text(payload.get("isbn")),
         search_mode=search_mode,
         multi_book=bool(payload.get("multi_book", False)),
         book_plan=_normalize_book_plan(payload.get("book_plan")),

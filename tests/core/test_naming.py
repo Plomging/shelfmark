@@ -219,6 +219,23 @@ class TestParseNamingTemplate:
         )
         assert result == "Brandon Sanderson/The Way of Kings"
 
+    def test_isbn_token(self):
+        """Test {ISBN} substitution and its absence dropping the whole block."""
+        metadata = {
+            "Author": "Brandon Sanderson",
+            "Title": "The Way of Kings",
+            "ISBN": "9780765326379",
+        }
+        result = parse_naming_template("{Author} - {Title} ({ISBN})", metadata)
+        assert result == "Brandon Sanderson - The Way of Kings (9780765326379)"
+
+        # Without an ISBN the block is dropped entirely
+        result = parse_naming_template(
+            "{Author} - {Title}{ ISBN}",
+            {"Author": "Brandon Sanderson", "Title": "The Way of Kings"},
+        )
+        assert result == "Brandon Sanderson - The Way of Kings"
+
 
 class TestWordSeparator:
     """Tests for the `word_separator` option (#1230)."""

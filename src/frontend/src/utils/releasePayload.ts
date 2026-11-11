@@ -63,6 +63,8 @@ export function buildReleaseDownloadPayload(
     // From the release, never the book: book.language is the provider's
     // canonical edition, which would mislabel a translated release.
     language: release.language ?? undefined,
+    // From the metadata provider only: prefer the 13-digit form.
+    isbn: book.isbn_13 || book.isbn_10 || undefined,
   };
 
   if (options.multiBook || options.bookPlan) {

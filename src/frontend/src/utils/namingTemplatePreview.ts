@@ -72,6 +72,13 @@ export const NAMING_TEMPLATE_TOKENS: NamingTemplateToken[] = [
     group: 'Core',
   },
   {
+    token: 'ISBN',
+    label: 'ISBN',
+    description: 'ISBN from the metadata provider (ISBN-13 when available, else ISBN-10)',
+    value: '9780451524935',
+    group: 'Core',
+  },
+  {
     token: 'User',
     label: 'User',
     description: 'Requesting user',
@@ -140,6 +147,7 @@ const KNOWN_TOKENS = [
   'title',
   'year',
   'user',
+  'isbn',
 ];
 
 // Mirrors AUTHOR_LIST_SEPARATOR in shelfmark/core/naming.py: authors arrive

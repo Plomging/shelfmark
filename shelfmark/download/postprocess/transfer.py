@@ -79,6 +79,7 @@ def build_metadata_dict(task: DownloadTask) -> dict:
         "SeriesPosition": task.series_position,
         "Narrator": task.narrator,
         "Language": normalize_language_code(task.language),
+        "ISBN": task.isbn,
         "User": task.username,
     }
 

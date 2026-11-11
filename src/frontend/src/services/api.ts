@@ -558,6 +558,7 @@ export type DownloadReleasePayload = {
   series_position?: number;
   subtitle?: string;
   language?: string; // Release language code, for the {Language} naming variable
+  isbn?: string; // ISBN from the metadata provider, for the {ISBN} naming variable
   search_author?: string;
   search_mode?: 'direct' | 'universal';
   multi_book?: boolean; // Split a multi-book pack into one book per subfolder/file

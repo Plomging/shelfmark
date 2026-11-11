@@ -66,4 +66,23 @@ describe('buildReleaseDownloadPayload', () => {
     expect(payload.multi_book).toBe(true);
     expect(payload.book_plan).toEqual(plan);
   });
+
+  it('carries the ISBN from the metadata provider, preferring ISBN-13', () => {
+    const with13 = buildReleaseDownloadPayload(
+      { ...book, isbn_10: '0316129047', isbn_13: '9780316129044' },
+      release,
+      'audiobook',
+    );
+    expect(with13.isbn).toBe('9780316129044');
+
+    const with10 = buildReleaseDownloadPayload(
+      { ...book, isbn_10: '0316129047' },
+      release,
+      'audiobook',
+    );
+    expect(with10.isbn).toBe('0316129047');
+
+    const without = buildReleaseDownloadPayload(book, release, 'audiobook');
+    expect(without.isbn).toBeUndefined();
+  });
 });

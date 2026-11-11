@@ -114,6 +114,32 @@ describe('namingTemplatePreview', () => {
     expect(language?.audiobookOnly).toBeFalsy();
   });
 
+  it('offers ISBN as a core variable and renders it into the filename', () => {
+    const isbn = NAMING_TEMPLATE_TOKENS.find((token) => token.token === 'ISBN');
+
+    expect(isbn?.group).toBe('Core');
+    expect(isbn?.audiobookOnly).toBeFalsy();
+
+    const rendered = renderNamingTemplate(
+      '{Author} - {Title}{ ISBN}',
+      {
+        ...SAMPLE_NAMING_METADATA,
+        Author: 'Andy Weir',
+        Title: 'Project Hail Mary',
+        ISBN: '9780593135204',
+      },
+      { allowPathSeparators: false },
+    );
+    expect(rendered.value).toBe('Andy Weir - Project Hail Mary 9780593135204');
+
+    const withoutIsbn = renderNamingTemplate(
+      '{Author} - {Title}{ ISBN}',
+      { ...SAMPLE_NAMING_METADATA, Author: 'Andy Weir', Title: 'Project Hail Mary', ISBN: '' },
+      { allowPathSeparators: false },
+    );
+    expect(withoutIsbn.value).toBe('Andy Weir - Project Hail Mary');
+  });
+
   it('separates translated editions into their own folder', () => {
     const template = '{Author}/{Title}{ (Language)}';
 

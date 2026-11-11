@@ -151,6 +151,7 @@ class DownloadTask:
     subtitle: str | None = None  # Book subtitle for naming templates
     narrator: str | None = None  # Release narrator for the {Narrator} template variable
     language: str | None = None  # Release language code for the {Language} template variable
+    isbn: str | None = None  # ISBN from the metadata provider for the {ISBN} template variable
 
     # Hardlinking support
     original_download_path: str | None = None  # Path in download client (for hardlinking)
