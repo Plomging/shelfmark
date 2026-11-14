@@ -1,5 +1,6 @@
 import pytest
 import requests
+from bs4 import BeautifulSoup
 
 from shelfmark.core.cache import get_metadata_cache
 from shelfmark.metadata_providers import MetadataSearchOptions, SearchType, babelio
@@ -45,6 +46,25 @@ BOOK_NO_JSONLD_HTML = BOOK_HTML.replace('type="application/ld+json"', 'type="tex
     '<h1 class="book-title">Antelucem, tome 2 : La symphonie des ombres</h1>'
     '<div class="book-meta"><a href="/auteur/Elie-Barbati/621657">Elie Barbati</a></div>',
 )
+
+# A series book whose summary is truncated server-side: the button's onclick
+# carries the resume id the full-summary endpoint wants (real layout)
+BOOK_SERIES_HTML = """<html><head><title>Antelucem</title></head><body>
+<nav class="breadcrumb"><a href="/selection/Les-livres-de-sf-fantasy-fantastique/365" class="livre_auteurs">Imaginaire</a><span>></span><a href="/selection/Les-livres-de-science-fiction/367" class="livre_auteurs">Science fiction</a><span>></span><a href="/livres/Barbati-Antelucem-tome-2--La-symphonie-des-ombres/1892050">Antelucem, tome 2</a></nav>
+<nav class="hero-serie" aria-label="Série"><p class="hero-serie-head"><span class="hero-serie-name">La Symphonie des Ombres</span><span class="hero-serie-pos">· tome 2 sur 3</span><a href="/serie/La-Symphonie-des-Ombres/99" class="hero-serie-all">Voir les 3 tomes</a></p></nav>
+<article class="book-hero"><div class="book-meta"><h1 class="book-title">Antelucem, tome 2 : La symphonie des ombres</h1>
+<div class="hero-summary" id="d_bio">Réfugiée dans les profondeurs d'Antelucem...<br /> Lyra voit son rêve <span><button type="button" class="hero-voir-plus" onclick="voir_plus_a('#d_bio',1,1651027)">Voir plus</button></span></div></div></article>
+<table class="biblio-table"><tbody><tr><td>Auteur</td><td><a href="/auteur/Elie-Barbati/621657">Elie Barbati</a></td></tr><tr><td>Série</td><td><a href="/serie/La-Symphonie-des-Ombres/99">La Symphonie des Ombres</a> tome 2 sur 3</td></tr><tr><td>Publication</td><td>21/07/2025</td></tr><tr><td>EAN</td><td>9781032400548</td></tr><tr><td>Pages</td><td>637</td></tr></tbody></table>
+<script type="application/ld+json"> {"@context":"https://schema.org","@graph":[ {"@type":"Book","name":"Antelucem, tome 2 : La symphonie des ombres","author":[{"@type":"Person","name":"Elie Barbati"}],"numberOfPages":637,"publisher":{"@type":"Organization","name":"Auto édition"},"datePublished":"2025-07-21","genre":["fantasy","science fiction"],"aggregateRating":{"@type":"AggregateRating","ratingValue":4.47,"ratingCount":89}} ]}</script>
+</body></html>"""
+
+RESUME_HTML = (
+    '<div id="d_bio">Réfugiée dans les profondeurs d\'Antelucem...<br /> Lyra voit son rêve '
+    "se briser quand les ombres remontent la vallée, et la symphonie reprend là où le "
+    "premier tome l'avait laissée, plus ample et plus sombre encore.</div>"
+)
+
+TRUNCATED_SYNOPSIS = "Réfugiée dans les profondeurs d'Antelucem... Lyra voit son rêve"
 
 CAPTCHA_HTML = (
     '<html lang="fr"><head><meta charset="ISO-8859-1">'
@@ -280,6 +300,64 @@ class TestBabelioBook:
 
         assert provider.get_book("not-an-id") is None
 
+    def test_get_book_fetches_the_full_summary_and_the_series(self):
+        get_metadata_cache().clear()
+        session = _BabelioSession({"livres": BOOK_SERIES_HTML, "aj_voir_plus_a.php": RESUME_HTML})
+        provider = _provider(session)
+
+        book = provider.get_book("1892050")
+
+        assert book is not None
+        # The endpoint received the resume id from the 'Voir plus' onclick
+        assert session.post_data == [{"type": "1", "id_obj": "1651027"}]
+        assert book.description == (
+            "Réfugiée dans les profondeurs d'Antelucem... Lyra voit son rêve se briser "
+            "quand les ombres remontent la vallée, et la symphonie reprend là où le "
+            "premier tome l'avait laissée, plus ample et plus sombre encore."
+        )
+        assert book.series_id == "99"
+        assert book.series_name == "La Symphonie des Ombres"
+        assert book.series_position == 2.0
+        assert book.series_count == 3
+        # JSON-LD genres are the site's curated set; the breadcrumb is the fallback
+        assert book.genres == ["fantasy", "science fiction"]
+        assert book.isbn_13 == "9781032400548"
+
+    def test_get_book_keeps_the_truncated_summary_when_the_endpoint_fails(self, monkeypatch):
+        monkeypatch.setattr(babelio, "_browser_fetch", lambda method, url, data: None)
+        get_metadata_cache().clear()
+        session = _BabelioSession({"livres": BOOK_SERIES_HTML, "aj_voir_plus_a.php": 403})
+        provider = _provider(session)
+
+        book = provider.get_book("1892050")
+
+        assert book is not None
+        assert book.description == TRUNCATED_SYNOPSIS
+        # The series still gets parsed: one failed extra request changes nothing
+        assert book.series_name == "La Symphonie des Ombres"
+
+    def test_get_book_keeps_the_truncated_summary_when_the_full_one_is_shorter(self):
+        get_metadata_cache().clear()
+        session = _BabelioSession(
+            {"livres": BOOK_SERIES_HTML, "aj_voir_plus_a.php": "<div>court</div>"}
+        )
+        provider = _provider(session)
+
+        book = provider.get_book("1892050")
+
+        assert book is not None
+        assert book.description == TRUNCATED_SYNOPSIS
+
+    def test_get_book_asks_nothing_for_a_short_summary(self):
+        get_metadata_cache().clear()
+        session = _BabelioSession({"livres": BOOK_HTML})
+        provider = _provider(session)
+
+        provider.get_book("1892050")
+
+        # No 'Voir plus' id in the summary, so no summary endpoint call
+        assert not any("aj_voir_plus_a" in url for _, url in session.urls)
+
 
 class TestBabelioIsbn:
     def test_search_by_isbn_verifies_the_candidate(self):
@@ -453,6 +531,38 @@ class TestBabelioBrowserFetch:
         # ImportError, as it would on an install without the browser extra.
         monkeypatch.setitem(__import__("sys").modules, "shelfmark.bypass.internal_bypasser", None)
         assert babelio._browser_fetch("GET", "https://www.babelio.com/livres/x/1", None) is None
+
+
+def _series_soup(pos_text: str):
+    return BeautifulSoup(
+        "<nav class='hero-serie'><span class='hero-serie-name'>Harry Potter</span>"
+        f"<span class='hero-serie-pos'>· {pos_text}</span>"
+        "<a href='/serie/Harry-Potter/1' class='hero-serie-all'>Voir les tomes</a></nav>",
+        "html.parser",
+    )
+
+
+@pytest.mark.parametrize(
+    ("pos_text", "expected"),
+    [
+        ("tome 1 sur 7", (1.0, 7)),
+        ("tome 1,5 sur 7", (1.5, 7)),
+        ("tome 12 sur 13", (12.0, 13)),
+        ("", (None, None)),
+    ],
+)
+def test_parse_series_positions(pos_text, expected):
+    series_id, name, position, count = babelio._parse_series(_series_soup(pos_text))
+
+    assert series_id == "1"
+    assert name == "Harry Potter"
+    assert (position, count) == expected
+
+
+def test_parse_series_without_a_nav():
+    soup = BeautifulSoup("<html><body>standalone</body></html>", "html.parser")
+
+    assert babelio._parse_series(soup) == (None, None, None, None)
 
 
 class TestBabelioHelpers:

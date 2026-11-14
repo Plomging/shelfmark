@@ -46,6 +46,9 @@ logger = setup_logger(__name__)
 BABELIO_BASE_URL = "https://www.babelio.com"
 BABELIO_SEARCH_URL = f"{BABELIO_BASE_URL}/recherche.php"
 BABELIO_BOOK_URL = f"{BABELIO_BASE_URL}/livres"
+# AJAX endpoint behind the book page's "Voir plus": POST type=1, id_obj=<resume id>
+# returns the full summary the page only shows truncated
+BABELIO_RESUME_URL = f"{BABELIO_BASE_URL}/aj_voir_plus_a.php"
 
 # The site publishes no limit; stay well below anything a reader would notice
 RATE_LIMIT_REQUESTS = 30
@@ -81,6 +84,12 @@ _LIVRES_RE = re.compile(r"/livres/[^/]+/(\d+)")
 _AUTEUR_RE = re.compile(r"/auteur/[^/]+/(\d+)")
 _RATING_RE = re.compile(r"\d+(?:[.,]\d+)?")
 _YEAR_RE = re.compile(r"\b(1\d{3}|20\d{2})\b")
+# The book page truncates its summary and appends a button calling
+# voir_plus_a('#d_bio', 1, <resume id>); the id feeds the full-summary endpoint
+_VOIR_PLUS_RE = re.compile(r"voir_plus_a\('#d_bio',\s*1,\s*(\d+)\)")
+_SERIE_LINK_RE = re.compile(r"/serie/[^/]+/(\d+)")
+# 'tome 1 sur 7' in the series nav (position may be fractional for novellas)
+_SERIE_POS_RE = re.compile(r"tome\s*([\d]+(?:[.,]\d+)?)\s*sur\s*(\d+)")
 
 # Search card layouts: the grid (title or mixed queries) and the author
 # bibliography carousel shown on an exact author match. Each maps to its
@@ -271,17 +280,54 @@ def _parse_genres(soup: BeautifulSoup) -> list[str]:
     return genres
 
 
-def _parse_synopsis(soup: BeautifulSoup) -> str | None:
-    """The description block, minus the 'Voir plus' footer Babelio appends."""
+def _parse_synopsis(soup: BeautifulSoup) -> tuple[str | None, str | None]:
+    """The description block, minus the 'Voir plus' footer Babelio appends.
+
+    Babelio serves the summary truncated, with a button whose onclick carries
+    the resume id the full-summary endpoint wants; both are returned so the
+    caller can fetch the rest.
+    """
     node = soup.find(id="d_bio")
     if not node:
-        return None
+        return None, None
+    # The truncation footer carries the resume id the full-summary endpoint wants
+    match = _VOIR_PLUS_RE.search(str(node))
+    resume_id = match.group(1) if match else None
     text = _clean_text(node.get_text(" "))
     for cut in (">Voir plus", "Voir plus", "Contributeurs :"):
         index = text.find(cut)
         if index >= 0:
             text = text[:index]
-    return text.strip() or None
+    return text.strip() or None, resume_id
+
+
+def _parse_series(soup: BeautifulSoup) -> tuple[str | None, str | None, float | None, int | None]:
+    """Series id, name, this book's position and the series' book count.
+
+    The page carries them in a dedicated nav (name, 'tome 1 sur 7', a link to
+    the series page); standalone books have none of it.
+    """
+    nav = soup.find("nav", class_="hero-serie")
+    if not nav:
+        return None, None, None, None
+    series_id: str | None = None
+    series_link = nav.select_one("a[href*='/serie/']")
+    if series_link:
+        match = _SERIE_LINK_RE.search(str(series_link.get("href") or ""))
+        series_id = match.group(1) if match else None
+    name_node = nav.select_one(".hero-serie-name")
+    series_name = _clean_text(name_node.get_text(" ")) if name_node else None
+    position: float | None = None
+    count: int | None = None
+    pos_node = nav.select_one(".hero-serie-pos")
+    if pos_node:
+        match = _SERIE_POS_RE.search(_clean_text(pos_node.get_text(" ")))
+        if match:
+            position = float(match.group(1).replace(",", "."))
+            count = int(match.group(2))
+    if not (series_id or series_name or position is not None):
+        return None, None, None, None
+    return series_id, series_name, position, count
 
 
 def _book_url(book_id: str) -> str:
@@ -389,6 +435,28 @@ class BabelioProvider(MetadataProvider):
                 logger.info("Babelio browser bypasser received %s; retrying once", reason)
         logger.warning("Babelio browser bypasser returned no usable page for %s", url)
         return None
+
+    def _full_synopsis(self, truncated: str, resume_id: str | None) -> str:
+        """Replace a 'Voir plus'-truncated summary with the site's full one.
+
+        The book page cuts long summaries and serves the rest through a POST
+        endpoint keyed by the resume id found next to the truncation. A short
+        summary has no such button, so nothing is requested. The fetched text
+        only wins if it is longer: a failed or empty answer keeps the original.
+        """
+        if not resume_id:
+            return truncated
+        html = self._request(
+            "POST",
+            BABELIO_RESUME_URL,
+            data={"type": "1", "id_obj": resume_id},
+        )
+        if not html:
+            logger.info("Babelio full summary request returned nothing for resume %s", resume_id)
+            return truncated
+        text = _clean_text(BeautifulSoup(html, "html.parser").get_text(" "))
+        # The endpoint answers with the whole summary, not only the missing part
+        return text if len(text) > len(truncated) else truncated
 
     # ------------------------------------------------------------------ search
 
@@ -557,9 +625,11 @@ class BabelioProvider(MetadataProvider):
         if not book_id or not title or not authors:
             return None
 
-        description = _parse_synopsis(soup)
+        description, resume_id = _parse_synopsis(soup)
         if not description:
             description = _clean_text(str(data.get("description", ""))) or None
+        if description:
+            description = self._full_synopsis(description, resume_id)
 
         publisher = ""
         publisher_data = data.get("publisher")
@@ -611,17 +681,22 @@ class BabelioProvider(MetadataProvider):
                 DisplayField(label="Ratings", value=f"{int(rating_count):,}", icon="users")
             )
 
-        genres = _parse_genres(soup)
+        # The JSON-LD genre list is the site's own curated set (the breadcrumb
+        # mixes in editorial selections like 'best of' lists); the breadcrumb is
+        # only there for pages without one
+        raw_genres = data.get("genre") or []
+        if isinstance(raw_genres, str):
+            raw_genres = [raw_genres]
+        genres = [_clean_text(str(genre)) for genre in raw_genres if _clean_text(str(genre))]
         if not genres:
-            raw_genres = data.get("genre") or []
-            if isinstance(raw_genres, str):
-                raw_genres = [raw_genres]
-            genres = [_clean_text(str(genre)) for genre in raw_genres if _clean_text(str(genre))]
+            genres = _parse_genres(soup)
 
         image = str(data.get("image", "")) or ""
         if not image:
             og_image = soup.find("meta", property="og:image")
             image = str(og_image.get("content") or "") if og_image else ""
+
+        series_id, series_name, series_position, series_count = _parse_series(soup)
 
         return BookMetadata(
             provider=self.name,
@@ -640,6 +715,10 @@ class BabelioProvider(MetadataProvider):
             search_author=authors[0],
             display_fields=display_fields,
             genres=genres,
+            series_id=series_id,
+            series_name=series_name,
+            series_position=series_position,
+            series_count=series_count,
         )
 
     def search_by_isbn(self, isbn: str) -> BookMetadata | None:
