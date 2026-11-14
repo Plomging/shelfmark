@@ -747,3 +747,140 @@ def test_helper_watchdog_waits_while_its_parent_is_alive(monkeypatch):
     internal_bypasser._watch_parent_process(999, interval=0.5)
 
     assert sleeps == [0.5, 0.5]
+
+
+def test_child_request_with_post_data_routes_to_post(monkeypatch, tmp_path):
+    import shelfmark.bypass.internal_bypasser as internal_bypasser
+
+    result_path = tmp_path / "result.json"
+    request = {
+        "url": "https://www.babelio.com/recherche.php",
+        "retry": 1,
+        "result_path": str(result_path),
+        "post_data": {"Recherche": "horde", "recherche": "OK"},
+    }
+
+    posts: list[tuple[str, dict]] = []
+    monkeypatch.setattr(
+        internal_bypasser,
+        "post",
+        lambda url, data, retry=None: posts.append((url, data)) or "<html>results</html>",
+    )
+    result = internal_bypasser._handle_child_request(json.dumps(request))
+
+    assert result == 0
+    assert json.loads(result_path.read_text(encoding="utf-8"))["html"] == "<html>results</html>"
+    assert posts == [
+        ("https://www.babelio.com/recherche.php", {"Recherche": "horde", "recherche": "OK"})
+    ]
+
+
+def test_child_request_without_post_data_routes_to_get(monkeypatch, tmp_path):
+    import shelfmark.bypass.internal_bypasser as internal_bypasser
+
+    result_path = tmp_path / "result.json"
+    request = {"url": "https://example.com", "retry": 1, "result_path": str(result_path)}
+
+    calls: list[str] = []
+
+    def _fail_post(*_args, **_kwargs):
+        calls.append("post")
+        raise AssertionError("post must not be called without post_data")
+
+    monkeypatch.setattr(internal_bypasser, "get", lambda url, retry=None: calls.append("get"))
+    monkeypatch.setattr(internal_bypasser, "post", _fail_post)
+
+    assert internal_bypasser._handle_child_request(json.dumps(request)) == 0
+    assert calls == ["get"]
+
+
+def test_post_form_js_builds_a_same_origin_sync_xhr():
+    import shelfmark.bypass.internal_bypasser as internal_bypasser
+
+    js = internal_bypasser._post_form_js(
+        "https://www.babelio.com/recherche.php?ref=1", {"Recherche": "horde & fils"}
+    )
+
+    assert "x.open('POST',\"/recherche.php?ref=1\",false)" in js
+    assert 'x.send("Recherche=horde+%26+fils")' in js
+    assert "JSON.stringify({s:x.status,t:x.responseText})" in js
+
+
+def test_post_aborts_when_the_origin_page_is_a_challenge(monkeypatch):
+    import shelfmark.bypass.internal_bypasser as internal_bypasser
+
+    class _Page:
+        async def wait(self):
+            return None
+
+        async def get_title(self):
+            return "Vérification de sécurité"
+
+        async def evaluate(self, _js):  # pragma: no cover - must not be reached
+            raise AssertionError("XHR must not run on a challenged page")
+
+    class _Driver:
+        async def get(self, _url):
+            return _Page()
+
+    assert (
+        asyncio.run(internal_bypasser._post("https://www.babelio.com/recherche.php", {}, _Driver()))
+        == ""
+    )
+
+
+def test_post_returns_the_page_html_and_extracts_cookies(monkeypatch):
+    import shelfmark.bypass.internal_bypasser as internal_bypasser
+
+    class _Page:
+        async def wait(self):
+            return None
+
+        async def get_title(self):
+            return "Babelio - Découvrez des livres"
+
+        async def evaluate(self, _js):
+            return '{"s": 200, "t": "<html>results</html>"}'
+
+    class _Driver:
+        async def get(self, _url):
+            return _Page()
+
+    extracted: list[str] = []
+
+    async def _extract(driver, page, url):
+        extracted.append(url)
+
+    monkeypatch.setattr(internal_bypasser, "_extract_cookies_from_cdp", _extract)
+
+    html = asyncio.run(
+        internal_bypasser._post(
+            "https://www.babelio.com/recherche.php", {"Recherche": "horde"}, _Driver()
+        )
+    )
+
+    assert html == "<html>results</html>"
+    assert extracted == ["https://www.babelio.com/recherche.php"]
+
+
+def test_post_reports_a_non_200_status(monkeypatch):
+    import shelfmark.bypass.internal_bypasser as internal_bypasser
+
+    class _Page:
+        async def wait(self):
+            return None
+
+        async def get_title(self):
+            return "Babelio"
+
+        async def evaluate(self, _js):
+            return '{"s": 403, "t": ""}'
+
+    class _Driver:
+        async def get(self, _url):
+            return _Page()
+
+    assert (
+        asyncio.run(internal_bypasser._post("https://www.babelio.com/recherche.php", {}, _Driver()))
+        == ""
+    )

@@ -71,6 +71,11 @@ ISBN_MAX_CANDIDATES = 3
 # An interstitial is a few KB of markup; a real page mentioning a marker is bigger
 MAX_CAPTCHA_HTML_CHARS = 64 * 1024
 
+# Chrome serves its own navigation error page on transient network changes; it is a
+# long body the bypasser's length heuristic mistakes for content, so it is filtered
+# before anything is parsed.
+_CHROME_ERROR_PAGE_MARKER = 'id="main-frame-error"'
+
 # Book and author ids are the trailing number of the path segment
 _LIVRES_RE = re.compile(r"/livres/[^/]+/(\d+)")
 _AUTEUR_RE = re.compile(r"/auteur/[^/]+/(\d+)")
@@ -144,12 +149,46 @@ def _valid_isbn(candidate: str | None) -> str | None:
     return None
 
 
+def _bypass_enabled() -> bool:
+    """Whether the browser bypasser is enabled in Settings (Cloudflare bypass toggle)."""
+    from shelfmark.core.config import config
+
+    return bool(config.get("USE_CF_BYPASS", True))
+
+
+def _browser_fetch(method: str, url: str, data: dict[str, str] | None) -> str | None:
+    """Fetch a page through the internal browser bypasser.
+
+    GETs use the bypasser directly; form POSTs run inside its cleared page, since
+    the bypasser itself only does GET. The bypass module imports SeleniumBase at
+    module scope, so the import stays lazy: an install without the browser extra
+    must keep every provider loadable.
+    """
+    try:
+        from shelfmark.bypass.internal_bypasser import get_bypassed_page, post
+    except ImportError:
+        logger.warning("Babelio needs the browser bypasser, but its dependencies are not installed")
+        return None
+    try:
+        if method == "POST" and data is not None:
+            return post(url, data)
+        return get_bypassed_page(url)
+    except (requests.RequestException, RuntimeError) as e:
+        logger.warning("Babelio browser bypasser failed for %s: %s", url, e)
+        return None
+
+
 def _is_captcha_page(html: str) -> bool:
     """Recognize Babelio's slider-captcha interstitial."""
     if len(html) > MAX_CAPTCHA_HTML_CHARS:
         return False
     lowered = html.lower()
     return any(marker in lowered for marker in CAPTCHA_MARKERS)
+
+
+def _is_browser_error_page(html: str) -> bool:
+    """Recognize Chrome's own navigation-error page."""
+    return _CHROME_ERROR_PAGE_MARKER in html
 
 
 def _json_ld(soup: BeautifulSoup, wanted_type: str) -> dict[str, Any]:
@@ -293,11 +332,13 @@ class BabelioProvider(MetadataProvider):
         )
 
     def _request(self, method: str, url: str, **kwargs: Any) -> str | None:
-        """Perform a request, retrying once past Babelio's anti-bot captcha.
+        """Perform a request, falling back to the browser bypasser past the captcha.
 
         The captcha arrives as a 403 or a small interstitial page. A challenged
         session keeps being challenged, so the cookies are dropped before the
         retry: a fresh request sometimes passes where a flagged one never will.
+        When the captcha still shows, the request goes through the internal
+        browser bypasser, whose real Chrome Babelio does not challenge.
         """
         for attempt in (1, 2):
             _rate_limiter.wait_if_needed()
@@ -320,15 +361,33 @@ class BabelioProvider(MetadataProvider):
                     logger.info("Babelio anti-bot captcha received; clearing session cookies")
                     self.session.cookies.clear()
                     continue
-                logger.warning(
-                    "Babelio is showing its security captcha and this session cannot "
-                    "pass it. Try again later or route the requests through a proxy."
-                )
-                return None
+                return self._browser_fallback(method, url, kwargs.get("data"))
             if response.status_code >= 400:
                 logger.warning("Babelio request failed: HTTP %s for %s", response.status_code, url)
                 return None
             return response.text
+        return None
+
+    def _browser_fallback(self, method: str, url: str, data: dict[str, str] | None) -> str | None:
+        """Fetch through the internal browser bypasser when HTTP keeps being challenged."""
+        if not _bypass_enabled():
+            logger.warning(
+                "Babelio is showing its security captcha and the browser bypasser is "
+                "disabled. Enable Cloudflare bypass in Settings, or try again later."
+            )
+            return None
+        logger.info("Babelio captcha persists; retrying through the browser bypasser: %s", url)
+        for attempt in (1, 2):
+            html = _browser_fetch(method, url, data)
+            if html and not _is_captcha_page(html) and not _is_browser_error_page(html):
+                return html
+            if attempt == 1:
+                # The site serves its interstitial intermittently, even to real
+                # Chrome, and Chrome's own error pages surface as long bodies the
+                # bypasser mistakes for content. Both are worth one more fetch.
+                reason = "its security captcha" if html and _is_captcha_page(html) else "no page"
+                logger.info("Babelio browser bypasser received %s; retrying once", reason)
+        logger.warning("Babelio browser bypasser returned no usable page for %s", url)
         return None
 
     # ------------------------------------------------------------------ search
@@ -614,7 +673,11 @@ def _test_babelio_connection() -> dict[str, Any]:
     if html is None:
         return {
             "success": False,
-            "message": "babelio.com is blocking automated requests (security captcha)",
+            "message": (
+                "babelio.com blocked every attempt, including the browser bypasser "
+                "(its security captcha). Check that the Cloudflare bypass is enabled "
+                "and its browser dependencies are installed, then retry."
+            ),
         }
     if "babelio" in html.lower():
         return {"success": True, "message": "Successfully connected to babelio.com"}
@@ -631,8 +694,9 @@ def babelio_settings() -> list[SettingsField]:
             description=(
                 "French community book catalog with excellent coverage of French editions "
                 "and translations. No API key required. It has no public API, so Shelfmark "
-                "reads the web pages; its security captcha can occasionally block automated "
-                "requests, in which case searches come back empty until it lifts."
+                "reads the web pages. Its security captcha gates plain HTTP requests, so "
+                "searches automatically go through the browser bypasser; each lookup "
+                "therefore takes a little longer, and the results are cached."
             ),
             link_url=BABELIO_BASE_URL,
             link_text="babelio.com",

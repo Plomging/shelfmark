@@ -16,7 +16,7 @@ Metadata providers allow searching for books and retrieving detailed metadata (t
 | **DNB** | No | Deutsche Nationalbibliothek, the German national library catalog. Best coverage for German-language editions |
 | **Databáze knih** | No | Czech and Slovak book catalog. It has no public API, so Shelfmark reads the web pages |
 | **Moly.hu** | No | Hungarian book catalog, read from the web pages. No API key required |
-| **Babelio** | No | French community book catalog, read from the web pages. No API key required |
+| **Babelio** | No | French community book catalog. Babelio's security captcha gates plain HTTP, so requests automatically fall back to the browser bypasser; each lookup therefore takes a little longer and results are cached. No API key required |
 
 
 ## Core Components

@@ -21,7 +21,7 @@ from http import HTTPStatus
 from pathlib import Path
 from threading import Event
 from typing import Any, Protocol, TypedDict, TypeGuard
-from urllib.parse import urlparse
+from urllib.parse import urlencode, urlparse
 
 import requests
 from seleniumbase import cdp_driver
@@ -1290,7 +1290,12 @@ class _BypassHelper:
 _BYPASS_HELPER = _BypassHelper()
 
 
-def _get_via_subprocess(url: str, retry: int, cancel_flag: Event | None = None) -> str:
+def _get_via_subprocess(
+    url: str,
+    retry: int,
+    cancel_flag: Event | None = None,
+    post_data: dict[str, str] | None = None,
+) -> str:
     """Run the browser bypass in a helper process isolated from gunicorn/gevent."""
     _check_cancellation(cancel_flag, "Bypass cancelled before helper process")
     result_path = (
@@ -1302,12 +1307,14 @@ def _get_via_subprocess(url: str, retry: int, cancel_flag: Event | None = None) 
     # active DNS config so the helper mirrors it (e.g. DoH) when building Chrome's host
     # resolver rules. Sent with every request, not just at spawn, because a helper outlives
     # changes the parent makes to its DNS provider.
-    payload = {
+    payload: dict[str, Any] = {
         "url": url,
         "retry": retry,
         "result_path": str(result_path),
         "dns_config": network.get_dns_config(),
     }
+    if post_data:
+        payload["post_data"] = post_data
     result = _BYPASS_HELPER.run(payload, _BYPASS_SUBPROCESS_TIMEOUT_SECONDS, cancel_flag)
 
     if not isinstance(result, dict):
@@ -1357,6 +1364,134 @@ def get(url: str, retry: int | None = None, cancel_flag: Event | None = None) ->
         if env.DOCKERMODE and os.environ.get(_BYPASS_CHILD_ENV) != "1":
             return _get_via_subprocess(url, retry, cancel_flag)
         return _run_bypass_in_current_process(url, retry, cancel_flag)
+
+
+def post(
+    url: str, data: dict[str, str], retry: int | None = None, cancel_flag: Event | None = None
+) -> str:
+    """Fetch a URL by POSTing the form from inside the cleared page.
+
+    Some origins answer a plain GET from the bypasser with real content but serve
+    POST-only endpoints (Babelio's search form) exclusively to requests carrying
+    the real browser's fingerprint. The POST is a sync XHR run in the context of a
+    page the browser already loaded, so it inherits that fingerprint and session.
+    """
+    retry = retry if retry is not None else _coerce_positive_int(app_config.MAX_RETRY, 10)
+
+    with LOCKED:
+        # Same 429 logic as get(): a solve cannot clear a throttle, so do not spend a
+        # browser start on a host that is cooling down.
+        remaining = network.host_cooldown_remaining(url)
+        if remaining > 0:
+            hostname = urlparse(url).hostname or url
+            msg = (
+                f"{hostname} is rate-limited (429); skipping bypass for ~{remaining:.0f}s "
+                "until the cooldown clears."
+            )
+            raise network.RateLimitedError(msg)
+
+        if env.DOCKERMODE and os.environ.get(_BYPASS_CHILD_ENV) != "1":
+            return _get_via_subprocess(url, retry, cancel_flag, post_data=data)
+        return _run_post_in_current_process(url, data, retry, cancel_flag)
+
+
+def _run_post_in_current_process(
+    url: str, data: dict[str, str], retry: int, cancel_flag: Event | None = None
+) -> str:
+    """Run the in-page form POST in the current process."""
+    timeout = (
+        _CHILD_BYPASS_TIMEOUT_SECONDS
+        if os.environ.get(_BYPASS_CHILD_ENV) == "1"
+        else _IN_PROCESS_BYPASS_TIMEOUT_SECONDS
+    )
+
+    async def _run_post() -> str:
+        driver = None
+        try:
+            driver = await _create_cdp_browser(url)
+            for attempt in range(retry):
+                _check_cancellation(cancel_flag, "Bypass cancelled before attempt")
+                try:
+                    result = await _post(url, data, driver, cancel_flag)
+                    if result:
+                        return result
+                except BypassCancelledError:
+                    raise
+                except _CDP_OPERATION_ERRORS as e:
+                    logger.warning(
+                        "In-page POST failed (attempt %s/%s): %s",
+                        attempt + 1,
+                        retry,
+                        type(e).__name__,
+                    )
+                    if type(e).__name__ in DRIVER_RESET_ERRORS:
+                        await _close_cdp_driver(driver)
+                        driver = await _create_cdp_browser(url)
+            logger.error("In-page POST failed for %s", url)
+            return ""
+        finally:
+            if driver:
+                await _close_cdp_driver(driver)
+
+    return _CDP_WORKER.run(_run_post(), timeout=timeout)
+
+
+def _post_form_js(url: str, data: dict[str, str]) -> str:
+    """Build a sync-XHR form POST, run in the page and returning JSON-encoded HTML."""
+    parsed = urlparse(url)
+    target = parsed.path or "/"
+    if parsed.query:
+        target += f"?{parsed.query}"
+    form = urlencode(data)
+    return (
+        "(()=>{const x=new XMLHttpRequest();"
+        f"x.open('POST',{json.dumps(target)},false);"
+        "x.setRequestHeader('Content-Type','application/x-www-form-urlencoded');"
+        f"x.send({json.dumps(form)});"
+        "return JSON.stringify({s:x.status,t:x.responseText});})()"
+    )
+
+
+async def _post(
+    url: str, data: dict[str, str], driver: Any, cancel_flag: Event | None = None
+) -> str:
+    """Load the origin, then POST the form from inside the page."""
+    _check_cancellation(cancel_flag, "Bypass cancelled before POST")
+
+    origin = f"{urlparse(url).scheme}://{urlparse(url).netloc}/"
+    page = await driver.get(origin)
+    with suppress(Exception):
+        await page.wait()
+
+    _check_cancellation(cancel_flag, "Bypass cancelled after page load")
+
+    # The origin itself may still be gated; a challenged page serves nothing useful.
+    try:
+        title = (await page.get_title() or "").lower()
+    except _CDP_OPERATION_ERRORS:
+        title = ""
+    if "vérification de sécurité" in title or "security" in title:
+        logger.warning("In-page POST aborted: the origin page itself is a challenge")
+        return ""
+
+    try:
+        raw = await page.evaluate(_post_form_js(url, data))
+    except _CDP_OPERATION_ERRORS as e:
+        logger.warning("In-page POST evaluation failed: %s", type(e).__name__)
+        logger.debug("Stack trace: %s", traceback.format_exc())
+        return ""
+    result = json.loads(raw) if raw else None
+    if not isinstance(result, dict) or result.get("s") != HTTPStatus.OK:
+        status = result.get("s") if isinstance(result, dict) else None
+        logger.warning("In-page POST got HTTP %s for %s", status, url)
+        return ""
+
+    html = result.get("t", "")
+    if isinstance(html, str) and html:
+        await _extract_cookies_from_cdp(driver, page, url)
+        return html
+    logger.warning("In-page POST returned an empty body for %s", url)
+    return ""
 
 
 def _get_proxy_string(url: str) -> str | None:
@@ -1826,6 +1961,7 @@ def _handle_child_request(request_line: str) -> int:
     retry = _coerce_positive_int(
         request.get("retry"), _coerce_positive_int(app_config.MAX_RETRY, 10)
     )
+    post_data = request.get("post_data")
 
     dns_config = request.get("dns_config")
     if isinstance(dns_config, dict):
@@ -1841,7 +1977,10 @@ def _handle_child_request(request_line: str) -> int:
     clear_cf_cookies()
 
     try:
-        html = get(url, retry=retry)
+        if isinstance(post_data, dict) and post_data:
+            html = post(url, data={str(k): str(v) for k, v in post_data.items()}, retry=retry)
+        else:
+            html = get(url, retry=retry)
         cookies, user_agents = export_store()
         payload = {
             "ok": True,
