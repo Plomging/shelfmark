@@ -1,7 +1,8 @@
 import { describe, it, expect } from 'vitest';
 
-import { isMetadataBook, type Release } from '../types/index';
+import { isMetadataBook, type Book, type Release } from '../types/index';
 import {
+  mergeMetadataBook,
   transformMetadataToBook,
   transformReleaseToDirectBook,
   transformSourceRecordToBook,
@@ -102,5 +103,69 @@ describe('bookTransformers.transformMetadataToBook', () => {
 
   it('leaves library undefined when the API sends none', () => {
     expect(transformMetadataToBook(metadata).library).toBeUndefined();
+  });
+});
+
+describe('bookTransformers.mergeMetadataBook', () => {
+  const searchBook: Book = {
+    id: 'babelio:18811',
+    title: 'Harry Potter, tome 1',
+    author: 'J. K. Rowling',
+    preview: 'https://example.com/cover.jpg',
+    provider: 'babelio',
+    provider_id: '18811',
+    display_fields: [{ label: 'Rating', value: '4.5', icon: 'star' }],
+  };
+  const fullBook: Book = {
+    ...searchBook,
+    year: '2003',
+    publisher: 'Gallimard Jeunesse',
+    isbn_13: '9782070518425',
+    genres: ['fantasy'],
+    series_id: '1',
+    series_name: 'Harry Potter',
+    series_position: 1,
+    series_count: 7,
+    description: 'The full summary.',
+    display_fields: [
+      { label: 'Pages', value: '332', icon: 'book' },
+      { label: 'Rating', value: '4.5', icon: 'star' },
+    ],
+  };
+
+  it('brings the detail fields over the search book', () => {
+    const merged = mergeMetadataBook(searchBook, fullBook);
+
+    expect(merged.year).toBe('2003');
+    expect(merged.publisher).toBe('Gallimard Jeunesse');
+    expect(merged.isbn_13).toBe('9782070518425');
+    expect(merged.genres).toEqual(['fantasy']);
+    expect(merged.series_name).toBe('Harry Potter');
+    expect(merged.series_position).toBe(1);
+    expect(merged.series_count).toBe(7);
+    expect(merged.description).toBe('The full summary.');
+    expect(merged.display_fields).toHaveLength(2);
+  });
+
+  it('keeps search values the detail fetch does not carry', () => {
+    const merged = mergeMetadataBook(searchBook, {
+      ...fullBook,
+      display_fields: undefined,
+      library: undefined,
+    });
+
+    expect(merged.display_fields).toEqual(searchBook.display_fields);
+  });
+
+  it('falls back to a minimal detail fetch without losing the search book', () => {
+    // id/title/author are required, so a real detail fetch always carries them
+    const emptyDetail: Book = {
+      id: 'babelio:18811',
+      title: 'Harry Potter, tome 1',
+      author: 'J. K. Rowling',
+    };
+    const merged = mergeMetadataBook(searchBook, emptyDetail);
+
+    expect(merged).toEqual(searchBook);
   });
 });
