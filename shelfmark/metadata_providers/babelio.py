@@ -50,8 +50,10 @@ BABELIO_BOOK_URL = f"{BABELIO_BASE_URL}/livres"
 # returns the full summary the page only shows truncated
 BABELIO_RESUME_URL = f"{BABELIO_BASE_URL}/aj_voir_plus_a.php"
 
-# The site publishes no limit; stay well below anything a reader would notice
-RATE_LIMIT_REQUESTS = 30
+# The site publishes no limit; stay well below anything a reader would notice.
+# Kept low after an IP got firewall-banned for a burst of lookups - quiet,
+# spread-out scraping is what keeps the provider usable.
+RATE_LIMIT_REQUESTS = 10
 RATE_LIMIT_WINDOW_SECONDS = 60
 
 REQUEST_HEADERS = {
