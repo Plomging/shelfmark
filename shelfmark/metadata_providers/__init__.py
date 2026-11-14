@@ -708,10 +708,10 @@ def sync_metadata_provider_selection() -> None:
 # Import provider implementations to trigger registration
 # These must be imported AFTER the base classes and registry are defined
 with suppress(ImportError):
-    from shelfmark.metadata_providers import hardcover as hardcover
+    from shelfmark.metadata_providers import babelio as babelio
 
 with suppress(ImportError):
-    from shelfmark.metadata_providers import openlibrary as openlibrary
+    from shelfmark.metadata_providers import dnb as dnb
 
 with suppress(ImportError):
     from shelfmark.metadata_providers import googlebooks as googlebooks
@@ -723,4 +723,7 @@ with suppress(ImportError):
     from shelfmark.metadata_providers import databazeknih as databazeknih
 
 with suppress(ImportError):
-    from shelfmark.metadata_providers import dnb as dnb
+    from shelfmark.metadata_providers import hardcover as hardcover
+
+with suppress(ImportError):
+    from shelfmark.metadata_providers import openlibrary as openlibrary
