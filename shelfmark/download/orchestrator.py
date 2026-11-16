@@ -296,6 +296,8 @@ def queue_release(
         subtitle = release_data.get("subtitle") or extra.get("subtitle")
         narrator = release_data.get("narrator") or extra.get("narrator")
         language = release_data.get("language") or extra.get("language")
+        book_data = release_data.get("book_data") or extra.get("book_data")
+        book_data = dict(book_data) if isinstance(book_data, dict) else None
         multi_book = bool(release_data.get("multi_book") or extra.get("multi_book"))
         book_plan = _normalize_book_plan(release_data.get("book_plan") or extra.get("book_plan"))
         ignored_files = _normalize_ignored_files(
@@ -333,6 +335,7 @@ def queue_release(
             preview=preview,
             content_type=content_type,
             source_url=source_url,
+            book_data=book_data,
             series_name=series_name,
             series_position=series_position,
             subtitle=subtitle,
@@ -543,6 +546,12 @@ def _normalize_book_plan(value: object) -> list[dict[str, Any]] | None:
     return books or None
 
 
+def _task_book_data(task: DownloadTask) -> dict[str, Any] | None:
+    """Copy the task's book_data, tolerating tasks without the field (test doubles)."""
+    raw = getattr(task, "book_data", None)
+    return dict(raw) if isinstance(raw, dict) else None
+
+
 def serialize_task_for_retry(task: DownloadTask) -> dict[str, Any]:
     """Serialize the task state needed for restart-safe retries."""
     raw_search_mode = getattr(task, "search_mode", None)
@@ -594,6 +603,7 @@ def serialize_task_for_retry(task: DownloadTask) -> dict[str, Any]:
         "can_retry_without_staged_source": bool(
             getattr(task, "can_retry_without_staged_source", True)
         ),
+        "book_data": _task_book_data(task),
     }
 
 
@@ -657,6 +667,11 @@ def _restore_task_from_retry_payload(payload: object) -> DownloadTask | None:
             dict(retry_source_context) if isinstance(retry_source_context, dict) else {}
         ),
         can_retry_without_staged_source=bool(payload.get("can_retry_without_staged_source", True)),
+        book_data=(
+            dict(payload["book_data"])
+            if isinstance(payload.get("book_data"), dict)
+            else None
+        ),
     )
 
 

@@ -25,6 +25,7 @@ from shelfmark.download.fs import (
     atomic_move,
     run_blocking_io,
 )
+from shelfmark.download.postprocess.epub_metadata import write_epub_metadata
 from shelfmark.download.postprocess.policy import (
     get_file_organization,
     get_template,
@@ -192,6 +193,26 @@ def _group_folder_name(source_root: Path | None) -> str:
     return ""
 
 
+def _maybe_write_epub_metadata(source_file: Path, task: DownloadTask) -> None:
+    """Embed task metadata into a staged EPUB before it is transferred.
+
+    Only staged files are touched: with hardlinking enabled the transfer reads
+    straight from the download client's directory, and modifying that file
+    would break seeding. Metadata failures are logged and ignored so a bad
+    EPUB cannot fail the download.
+    """
+    try:
+        if source_file.suffix.lower() == ".epub" and write_epub_metadata(source_file, task):
+            logger.debug("Task %s: embedded metadata into %s", task.task_id, source_file.name)
+    except Exception:
+        logger.warning(
+            "Task %s: unexpected error writing EPUB metadata into %s",
+            task.task_id,
+            source_file.name,
+            exc_info=True,
+        )
+
+
 def transfer_book_files(
     book_files: list[Path],
     destination: Path,
@@ -228,6 +249,10 @@ def transfer_book_files(
 
     final_paths: list[Path] = []
     op_counts: dict[str, int] = {"hardlink": 0, "copy": 0, "move": 0}
+
+    for source_file in book_files:
+        if not use_hardlink:
+            _maybe_write_epub_metadata(source_file, task)
 
     if organization_mode == "organize":
         template = get_template(is_audiobook=is_audiobook, organization_mode="organize")

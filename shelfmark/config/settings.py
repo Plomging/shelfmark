@@ -1133,6 +1133,16 @@ def download_settings() -> list[SettingsField]:
                 "value": "folder",
             },
         ),
+        CheckboxField(
+            key="WRITE_EPUB_METADATA",
+            label="Write Metadata into EPUBs",
+            description=(
+                "Embed known metadata (title, author, year, language, series, publisher, "
+                "ISBN, description) directly into downloaded EPUB files before delivery. "
+                "Files that cannot be updated are delivered unmodified."
+            ),
+            default=False,
+        ),
         SelectField(
             key="FILE_ORGANIZATION",
             label="File Organization",

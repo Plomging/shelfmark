@@ -169,6 +169,13 @@ def _build_release_result_data_from_book_data(
         "preview": book_data.get("preview"),
         "content_type": content_type,
         "source_url": book_data.get("source_url"),
+        # Keep the full provider record so post-processing features (e.g. EPUB
+        # metadata writing) can access publisher, ISBNs, description...
+        "book_data": {
+            key: book_data.get(key)
+            for key in ("publisher", "isbn_10", "isbn_13", "description", "genres", "series_count")
+            if book_data.get(key) is not None
+        },
         "search_mode": "direct",
     }
     return {key: value for key, value in payload.items() if value is not None}
