@@ -201,6 +201,77 @@ class TestWriteEpubMetadata:
             assert "dc:description" not in opf
 
 
+class TestRealEpubRegressions:
+    """Regressions found by validating against real, downloaded EPUBs."""
+
+    _WITH_REFINES_OPF = """<?xml version="1.0" encoding="utf-8"?>
+<package xmlns="http://www.idpf.org/2007/opf" version="3.0" unique-identifier="uid">
+  <metadata xmlns:dc="http://purl.org/dc/elements/1.1/">
+    <dc:identifier id="uid">urn:uuid:old</dc:identifier>
+    <dc:title id="title">Old Title</dc:title>
+    <meta property="file-as" refines="#title">Title, Old</meta>
+    <meta property="title-type" refines="#title">main</meta>
+    <dc:creator id="creator">Wrong Author</dc:creator>
+    <meta property="role" refines="#creator" scheme="marc:relators">aut</meta>
+    <dc:language>en</dc:language>
+  </metadata>
+  <manifest><item id="c1" href="ch1.xhtml" media-type="application/xhtml+xml"/></manifest>
+  <spine><itemref idref="c1"/></spine>
+</package>"""
+
+    def test_no_temp_file_left_behind(self, tmp_path, metadata_enabled):
+        """The write goes through a sibling temp file that must be cleaned up."""
+        path = tmp_path / "book.epub"
+        _make_epub(path)
+
+        assert write_epub_metadata(path, _task()) is True
+
+        leftovers = list(tmp_path.glob("*.shelfmark-meta.tmp"))
+        assert leftovers == []
+        # And the original file was actually replaced in place.
+        with EPUB(path) as book:
+            assert "Dune" in str(book.package_document.soup)
+
+    def test_refines_of_removed_items_purged(self, tmp_path, metadata_enabled):
+        """Metas refining a replaced item must not be left orphaned."""
+        path = tmp_path / "book.epub"
+        _make_epub(path, self._WITH_REFINES_OPF)
+        write_epub_metadata(path, _task())
+
+        with EPUB(path) as book:
+            soup = book.package_document.soup
+            md = soup.find("metadata")
+            defined = {tag.get("id") for tag in md.find_all(id=True)}
+            for meta in md.find_all("meta"):
+                refines = meta.get("refines", "").lstrip("#")
+                if refines:
+                    assert refines in defined, f"orphan refines: #{refines}"
+
+    def test_calibre_prefix_declared_on_package(self, tmp_path, metadata_enabled):
+        """calibre:* metas require a prefix declaration on <package> (OPF-028)."""
+        path = tmp_path / "book.epub"
+        _make_epub(path)
+        write_epub_metadata(path, _task())
+
+        with EPUB(path) as book:
+            soup = book.package_document.soup
+            pkg = soup.find("package")
+            md = soup.find("metadata")
+            assert "calibre:" in (pkg.get("prefix") or "")
+            # epublib's parent_tag is <metadata>; the declaration belongs one
+            # level up, on <package>.
+            assert "calibre:" not in (md.get("prefix") or "")
+
+    def test_no_prefix_added_without_series(self, tmp_path, metadata_enabled):
+        path = tmp_path / "book.epub"
+        _make_epub(path)
+        write_epub_metadata(path, _task(series_name=None, series_position=None))
+
+        with EPUB(path) as book:
+            pkg = book.package_document.soup.find("package")
+            assert "calibre:" not in (pkg.get("prefix") or "")
+
+
 class TestTransferIntegration:
     def test_transfer_writes_metadata_before_transfer(self, tmp_path, monkeypatch, metadata_enabled):
         from shelfmark.core.config import config

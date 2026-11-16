@@ -47,9 +47,25 @@ def _format_series_position(position: float | None) -> str | None:
 
 
 def _clear_existing_values(book: BookMetadata, names: tuple[str, ...]) -> None:
-    """Remove existing items for the given metadata names, dc or meta alike."""
+    """Remove existing items for the given metadata names, dc or meta alike.
+
+    Items refined by other metadata entries (file-as, title-type, role...) go
+    too: epublib only removes the item itself, and epubcheck flags refines
+    pointing at ids that no longer exist.
+    """
+    stale_ids: set[str] = set()
     for item in list(book.items):
         if isinstance(item, ValuedMetadataItem) and item.name in names:
+            item_id = getattr(item, "id", None)
+            if item_id:
+                stale_ids.add(str(item_id))
+            book.remove_item(item)
+
+    if not stale_ids:
+        return
+    for item in list(book.items):
+        refines = getattr(item, "refines", None)
+        if refines and str(refines).lstrip("#") in stale_ids:
             book.remove_item(item)
 
 def _set_dc_value(book: BookMetadata, name: str, value: str | None) -> None:
@@ -58,6 +74,28 @@ def _set_dc_value(book: BookMetadata, name: str, value: str | None) -> None:
         return
     _clear_existing_values(book, (name,))
     book.add_dc(name, str(value).strip())
+
+
+#: Declared on <package> so epubcheck accepts calibre:* meta properties.
+_CALIBRE_PREFIX_DECL = "calibre: https://calibre-ebook.com"
+
+
+def _declare_calibre_prefix(book: BookMetadata) -> None:
+    """Add the calibre prefix declaration to <package> if not already present.
+
+    EPUB 3 requires property prefixes to be declared via xmlns or the prefix
+    attribute; readers accept calibre:series either way, but epubcheck errors
+    on the undeclared form.
+    """
+    metadata_tag = book.parent_tag
+    package_tag = metadata_tag.parent if metadata_tag is not None else None
+    if package_tag is None:
+        return
+    existing = package_tag.get("prefix")
+    if not existing:
+        package_tag["prefix"] = _CALIBRE_PREFIX_DECL
+    elif "calibre:" not in existing:
+        package_tag["prefix"] = f"{existing} {_CALIBRE_PREFIX_DECL}"
 
 
 def _set_series_metadata(book: BookMetadata, task: DownloadTask) -> None:
@@ -72,6 +110,7 @@ def _set_series_metadata(book: BookMetadata, task: DownloadTask) -> None:
         book.add("calibre:series", series_name)
     if position is not None:
         book.add("calibre:series_index", position)
+    _declare_calibre_prefix(book)
 
 
 def _set_subtitle(book: BookMetadata, task: DownloadTask) -> None:
@@ -120,31 +159,40 @@ def write_epub_metadata(path: Path, task: DownloadTask) -> bool:
 def _write_epub_metadata_inner(path: Path, task: DownloadTask) -> bool:
     from epublib import EPUB
 
-    with EPUB(path) as book:
-        metadata = book.metadata
+    # Write to a sibling temp file, then atomically replace: epublib keeps the
+    # source zip open while writing, so writing straight into `path` corrupts
+    # the very file being read (EOFError on any real-sized EPUB).
+    temp_path = path.with_name(f".{path.stem}.shelfmark-meta.tmp")
+    try:
+        with EPUB(path) as book:
+            metadata = book.metadata
 
-        _set_dc_value(metadata, "title", task.title)
-        _set_dc_value(metadata, "creator", task.author)
-        _set_dc_value(metadata, "publisher", (task.book_data or {}).get("publisher"))
-        _set_dc_value(metadata, "description", (task.book_data or {}).get("description"))
-        _set_dc_value(metadata, "date", str(task.year) if task.year else None)
-        _set_dc_value(metadata, "language", task.language)
-        isbn = (task.book_data or {}).get("isbn_13") or (task.book_data or {}).get("isbn_10")
-        if isbn:
-            # Add the ISBN as a second identifier rather than replacing the
-            # existing unique identifier, which the spine/manifest may reference.
-            metadata.add_dc("identifier", str(isbn).strip())
-        _set_series_metadata(metadata, task)
-        _set_subtitle(metadata, task)
+            _set_dc_value(metadata, "title", task.title)
+            _set_dc_value(metadata, "creator", task.author)
+            _set_dc_value(metadata, "publisher", (task.book_data or {}).get("publisher"))
+            _set_dc_value(metadata, "description", (task.book_data or {}).get("description"))
+            _set_dc_value(metadata, "date", str(task.year) if task.year else None)
+            _set_dc_value(metadata, "language", task.language)
+            isbn = (task.book_data or {}).get("isbn_13") or (task.book_data or {}).get("isbn_10")
+            if isbn:
+                # Add the ISBN as a second identifier rather than replacing the
+                # existing unique identifier, which the spine/manifest may reference.
+                metadata.add_dc("identifier", str(isbn).strip())
+            _set_series_metadata(metadata, task)
+            _set_subtitle(metadata, task)
 
-        # Cover embedding: download/cache the cover, add it as a resource with
-        # book.resources.add(create_resource_from_path(...)), then promote it
-        # with book.resources.set_cover_image(...). Intentionally not implemented
-        # yet: the cached cover is a proxy URL, and cover-less EPUBs need a
-        # title-page XHTML fallback for some readers.
-        metadata.modified = datetime.now(UTC)
+            # Cover embedding: download/cache the cover, add it as a resource with
+            # book.resources.add(create_resource_from_path(...)), then promote it
+            # with book.resources.set_cover_image(...). Intentionally not implemented
+            # yet: the cached cover is a proxy URL, and cover-less EPUBs need a
+            # title-page XHTML fallback for some readers.
+            metadata.modified = datetime.now(UTC)
 
-        book.write(path)
+            book.write(temp_path)
+
+        temp_path.replace(path)
+    finally:
+        temp_path.unlink(missing_ok=True)
 
     logger.info("Task %s: wrote metadata into %s", task.task_id, path.name)
     return True
