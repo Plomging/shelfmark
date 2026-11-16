@@ -145,6 +145,14 @@ def _search_options(**kwargs) -> MetadataSearchOptions:
     return MetadataSearchOptions(**kwargs)
 
 
+@pytest.fixture(autouse=True)
+def _reset_babelio_browser_mode():
+    """Keep the browser-only circuit breaker from leaking between tests."""
+    babelio._browser_mode_until = 0.0
+    yield
+    babelio._browser_mode_until = 0.0
+
+
 class TestBabelioSearch:
     def test_search_parses_both_card_layouts(self):
         get_metadata_cache().clear()
@@ -412,9 +420,9 @@ class TestBabelioCaptcha:
         books = provider.search(_search_options(query="horde"))
 
         assert [b.provider_id for b in books] == ["1356017", "1993737", "5420"]
-        assert session.cookies.clear_calls == 1
-        # Cleared cookies, retried once, then handed over to the browser
-        assert session.calls == 2
+        # One HTTP attempt, no retry into the same 403, then the browser
+        assert session.calls == 1
+        assert session.cookies.clear_calls == 0
         assert fallback_calls == [
             (
                 "POST",
@@ -473,17 +481,8 @@ class TestBabelioCaptcha:
         provider = _provider(session)
 
         assert provider.search(_search_options(query="horde")) == []
-        assert session.calls == 2
+        assert session.calls == 1
         assert fallback_calls == []
-
-    def test_captcha_retry_succeeds(self):
-        get_metadata_cache().clear()
-        session = _BabelioSession({"recherche.php": [CAPTCHA_HTML, SEARCH_HTML]})
-        provider = _provider(session)
-
-        books = provider.search(_search_options(query="horde"))
-
-        assert [b.provider_id for b in books] == ["1356017", "1993737", "5420"]
 
     def test_get_book_on_captcha_returns_none(self, monkeypatch):
         monkeypatch.setattr(babelio, "_browser_fetch", lambda method, url, data: None)
@@ -492,6 +491,66 @@ class TestBabelioCaptcha:
         provider = _provider(session)
 
         assert provider.get_book("1892050") is None
+
+
+class TestBabelioBrowserMode:
+    """The circuit breaker: one 403, then browser-only until HTTP clears."""
+
+    def test_after_a_captcha_the_next_requests_skip_http(self, monkeypatch):
+        fallback_calls = []
+        monkeypatch.setattr(
+            babelio, "_browser_fetch", lambda m, u, d: fallback_calls.append(u) or SEARCH_HTML
+        )
+        get_metadata_cache().clear()
+        session = _BabelioSession({"recherche.php": CAPTCHA_HTML})
+        provider = _provider(session)
+
+        assert provider.search(_search_options(query="horde"))
+        assert session.calls == 1
+        assert babelio._http_challenged()
+
+        # Even a different query runs browser-only now: no more HTTP 403s
+        second = _BabelioSession({})
+        provider.session = second
+        assert provider.search(_search_options(query="damasio"))
+        assert second.calls == 0
+        assert len(fallback_calls) == 2
+
+    def test_a_clean_http_response_clears_the_browser_mode(self, monkeypatch):
+        monkeypatch.setattr(babelio, "_browser_fetch", lambda m, u, d: SEARCH_HTML)
+        get_metadata_cache().clear()
+        session = _BabelioSession({"recherche.php": CAPTCHA_HTML})
+        provider = _provider(session)
+
+        assert provider.search(_search_options(query="horde"))
+        assert babelio._http_challenged()
+
+        # The site is clean again: the next query gets plain HTTP back
+        babelio._mark_http_ok()
+        provider.session = _BabelioSession({"recherche.php": SEARCH_HTML})
+        assert provider.search(_search_options(query="horde"))
+        assert not babelio._http_challenged()
+
+    def test_mark_http_ok_clears_the_state(self):
+        babelio._mark_http_challenged()
+        assert babelio._http_challenged()
+
+        babelio._mark_http_ok()
+
+        assert not babelio._http_challenged()
+
+    def test_the_browser_mode_expires_after_its_window(self, monkeypatch):
+        now = [1000.0]
+        monkeypatch.setattr(babelio.time, "monotonic", lambda: now[0])
+
+        babelio._mark_http_challenged()
+        assert babelio._http_challenged()
+
+        now[0] += babelio._BROWSER_MODE_SECONDS - 1
+        assert babelio._http_challenged()
+
+        now[0] += 2
+        assert not babelio._http_challenged()
 
 
 class TestBabelioBrowserFetch:

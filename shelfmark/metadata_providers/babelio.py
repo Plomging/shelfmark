@@ -11,6 +11,7 @@ Pages used (ids are the number at the end of the path; the site redirects
 
 import json
 import re
+import time
 import unicodedata
 from typing import Any, ClassVar
 from urllib.parse import urljoin
@@ -63,9 +64,18 @@ REQUEST_HEADERS = {
 }
 
 # Babelio's own anti-bot interstitial (not Cloudflare): a "Vérification de
-# sécurité" page with a slider captcha. It appears intermittently, so requests
-# that run into it are retried once on cleared cookies, then given up on.
+# sécurité" page with a slider captcha. It is IP-reputation driven: a flagged
+# address is challenged on every plain HTTP request, so the first one switches
+# to browser-only mode instead of retrying into the same 403 again - repeated
+# 403s are exactly what escalates to a firewall ban.
 CAPTCHA_MARKERS = ("vérification de sécurité", "slider-track")
+
+# After a captcha on plain HTTP, every request goes straight to the browser
+# bypasser for this long: the flagged session keeps being challenged, so
+# spending a 403 on each request buys nothing and risks the ban. Kept in
+# process memory only; one clean HTTP response clears it.
+_BROWSER_MODE_SECONDS = 15 * 60
+_browser_mode_until = 0.0
 
 ISBN_13_LENGTH = 13
 # The search POST has no known page parameter; only the first page is fetched
@@ -158,6 +168,29 @@ def _valid_isbn(candidate: str | None) -> str | None:
     if re.fullmatch(r"\d{9}[\dX]", digits):
         return digits
     return None
+
+
+def _http_challenged() -> bool:
+    """Whether plain HTTP is known to be challenged right now."""
+    return time.monotonic() < _browser_mode_until
+
+
+def _mark_http_challenged() -> None:
+    """Switch to browser-only mode: stop paying a 403 on every request."""
+    global _browser_mode_until
+    _browser_mode_until = time.monotonic() + _BROWSER_MODE_SECONDS
+    logger.warning(
+        "Babelio is challenging plain HTTP requests; browser-only mode for %d min",
+        _BROWSER_MODE_SECONDS // 60,
+    )
+
+
+def _mark_http_ok() -> None:
+    """A clean HTTP response clears the challenge state."""
+    global _browser_mode_until
+    if _http_challenged():
+        logger.info("Babelio answers plain HTTP again; leaving browser-only mode")
+    _browser_mode_until = 0.0
 
 
 def _bypass_enabled() -> bool:
@@ -380,41 +413,38 @@ class BabelioProvider(MetadataProvider):
         )
 
     def _request(self, method: str, url: str, **kwargs: Any) -> str | None:
-        """Perform a request, falling back to the browser bypasser past the captcha.
+        """Perform one plain HTTP request, falling back to the browser past the captcha.
 
-        The captcha arrives as a 403 or a small interstitial page. A challenged
-        session keeps being challenged, so the cookies are dropped before the
-        retry: a fresh request sometimes passes where a flagged one never will.
-        When the captcha still shows, the request goes through the internal
-        browser bypasser, whose real Chrome Babelio does not challenge.
+        A flagged address is challenged on every plain HTTP request, so there is
+        no point retrying one: the first captcha switches to browser-only mode
+        (see `_mark_http_challenged`), whose real Chrome Babelio does not
+        challenge. The switch clears itself on the first clean HTTP response.
         """
-        for attempt in (1, 2):
-            _rate_limiter.wait_if_needed()
-            try:
-                response = self.session.request(
-                    method,
-                    url,
-                    verify=get_ssl_verify(url),
-                    proxies=get_proxies(url),
-                    **kwargs,
-                )
-            except requests.Timeout:
-                logger.warning("Babelio request timed out: %s", url)
-                return None
-            except requests.RequestException as e:
-                logger.warning("Babelio request failed: %s (%s)", url, e.__class__.__name__)
-                return None
-            if response.status_code == 403 or _is_captcha_page(response.text):
-                if attempt == 1:
-                    logger.info("Babelio anti-bot captcha received; clearing session cookies")
-                    self.session.cookies.clear()
-                    continue
-                return self._browser_fallback(method, url, kwargs.get("data"))
-            if response.status_code >= 400:
-                logger.warning("Babelio request failed: HTTP %s for %s", response.status_code, url)
-                return None
-            return response.text
-        return None
+        if _http_challenged():
+            return self._browser_fallback(method, url, kwargs.get("data"))
+        _rate_limiter.wait_if_needed()
+        try:
+            response = self.session.request(
+                method,
+                url,
+                verify=get_ssl_verify(url),
+                proxies=get_proxies(url),
+                **kwargs,
+            )
+        except requests.Timeout:
+            logger.warning("Babelio request timed out: %s", url)
+            return None
+        except requests.RequestException as e:
+            logger.warning("Babelio request failed: %s (%s)", url, e.__class__.__name__)
+            return None
+        if response.status_code == 403 or _is_captcha_page(response.text):
+            _mark_http_challenged()
+            return self._browser_fallback(method, url, kwargs.get("data"))
+        if response.status_code >= 400:
+            logger.warning("Babelio request failed: HTTP %s for %s", response.status_code, url)
+            return None
+        _mark_http_ok()
+        return response.text
 
     def _browser_fallback(self, method: str, url: str, data: dict[str, str] | None) -> str | None:
         """Fetch through the internal browser bypasser when HTTP keeps being challenged."""
