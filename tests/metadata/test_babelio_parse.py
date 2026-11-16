@@ -91,16 +91,6 @@ class _BabelioResponse:
             raise requests.HTTPError(f"HTTP {self.status_code}")
 
 
-class _BabelioCookies:
-    """Stands in for the session's cookie jar so tests can watch clears."""
-
-    def __init__(self):
-        self.clear_calls = 0
-
-    def clear(self):
-        self.clear_calls += 1
-
-
 class _BabelioSession:
     """Serves canned HTML per URL substring, first match wins.
 
@@ -112,7 +102,6 @@ class _BabelioSession:
         self.pages = pages
         self.urls: list[tuple[str, str]] = []
         self.post_data: list[dict | None] = []
-        self.cookies = _BabelioCookies()
         self._served: dict[str, int] = {}
 
     @property
@@ -135,9 +124,15 @@ class _BabelioSession:
         raise requests.HTTPError(f"unexpected URL: {url}")
 
 
+# The session under test, registered by _provider and used by the autouse
+# fixture that routes every browser fetch through it
+_routed_session: list[_BabelioSession | None] = [None]
+
+
 def _provider(session: _BabelioSession) -> BabelioProvider:
     provider = BabelioProvider()
     provider.session = session
+    _routed_session[0] = session
     return provider
 
 
@@ -146,11 +141,27 @@ def _search_options(**kwargs) -> MetadataSearchOptions:
 
 
 @pytest.fixture(autouse=True)
-def _reset_babelio_browser_mode():
-    """Keep the browser-only circuit breaker from leaking between tests."""
-    babelio._browser_mode_until = 0.0
+def _browser_only_fetch(monkeypatch):
+    """Route the provider's browser-only fetches through the fake session.
+
+    Babelio never speaks plain HTTP anymore: the provider asks the browser
+    bypasser for everything, so the fake session answers from there.
+    """
+
+    def fetch(method, url, data=None):
+        session = _routed_session[0]
+        if session is None:
+            return None
+        try:
+            response = session.request(method, url, data=data)
+        except requests.RequestException:
+            return None
+        return response.text if response.status_code < 400 else None
+
+    monkeypatch.setattr(babelio, "_browser_fetch", fetch)
+    _routed_session[0] = None
     yield
-    babelio._browser_mode_until = 0.0
+    _routed_session[0] = None
 
 
 class TestBabelioSearch:
@@ -331,8 +342,7 @@ class TestBabelioBook:
         assert book.genres == ["fantasy", "science fiction"]
         assert book.isbn_13 == "9781032400548"
 
-    def test_get_book_keeps_the_truncated_summary_when_the_endpoint_fails(self, monkeypatch):
-        monkeypatch.setattr(babelio, "_browser_fetch", lambda method, url, data: None)
+    def test_get_book_keeps_the_truncated_summary_when_the_endpoint_fails(self):
         get_metadata_cache().clear()
         session = _BabelioSession({"livres": BOOK_SERIES_HTML, "aj_voir_plus_a.php": 403})
         provider = _provider(session)
@@ -405,25 +415,23 @@ class TestBabelioIsbn:
 
 
 class TestBabelioCaptcha:
-    def test_captcha_falls_back_to_the_browser_bypasser(self, monkeypatch):
-        fallback_calls = []
+    """Browser-only fetching: the bypasser is the one and only client."""
+
+    def test_every_request_goes_through_the_browser_fetch(self, monkeypatch):
+        calls = []
 
         def fake_fetch(method, url, data):
-            fallback_calls.append((method, url, data))
+            calls.append((method, url, data))
             return SEARCH_HTML
 
         monkeypatch.setattr(babelio, "_browser_fetch", fake_fetch)
         get_metadata_cache().clear()
-        session = _BabelioSession({"recherche.php": CAPTCHA_HTML})
-        provider = _provider(session)
+        provider = BabelioProvider()
 
         books = provider.search(_search_options(query="horde"))
 
         assert [b.provider_id for b in books] == ["1356017", "1993737", "5420"]
-        # One HTTP attempt, no retry into the same 403, then the browser
-        assert session.calls == 1
-        assert session.cookies.clear_calls == 0
-        assert fallback_calls == [
+        assert calls == [
             (
                 "POST",
                 "https://www.babelio.com/recherche.php",
@@ -431,14 +439,14 @@ class TestBabelioCaptcha:
             )
         ]
 
-    def test_captcha_fallback_gives_up_without_a_page(self, monkeypatch):
+    def test_browser_fetch_gives_up_without_a_page(self, monkeypatch):
         monkeypatch.setattr(babelio, "_browser_fetch", lambda method, url, data: None)
         get_metadata_cache().clear()
-        provider = _provider(_BabelioSession({"recherche.php": CAPTCHA_HTML}))
+        provider = BabelioProvider()
 
         assert provider.search(_search_options(query="horde")) == []
 
-    def test_captcha_fallback_rejects_a_captcha_page(self, monkeypatch):
+    def test_browser_fetch_rejects_a_captcha_page(self, monkeypatch):
         calls = []
 
         def fake_fetch(method, url, data):
@@ -447,7 +455,7 @@ class TestBabelioCaptcha:
 
         monkeypatch.setattr(babelio, "_browser_fetch", fake_fetch)
         get_metadata_cache().clear()
-        provider = _provider(_BabelioSession({"recherche.php": CAPTCHA_HTML}))
+        provider = BabelioProvider()
 
         assert provider.search(_search_options(query="horde")) == []
         # One retry before giving up: the interstitial shows intermittently
@@ -457,7 +465,7 @@ class TestBabelioCaptcha:
         pages = iter([CHROME_ERROR_HTML, SEARCH_HTML])
         monkeypatch.setattr(babelio, "_browser_fetch", lambda method, url, data: next(pages))
         get_metadata_cache().clear()
-        provider = _provider(_BabelioSession({"recherche.php": CAPTCHA_HTML}))
+        provider = BabelioProvider()
 
         books = provider.search(_search_options(query="horde"))
 
@@ -466,91 +474,31 @@ class TestBabelioCaptcha:
     def test_browser_error_page_alone_gives_up(self, monkeypatch):
         monkeypatch.setattr(babelio, "_browser_fetch", lambda method, url, data: CHROME_ERROR_HTML)
         get_metadata_cache().clear()
-        provider = _provider(_BabelioSession({"recherche.php": CAPTCHA_HTML}))
+        provider = BabelioProvider()
 
         assert provider.search(_search_options(query="horde")) == []
 
-    def test_captcha_fallback_skipped_when_bypass_disabled(self, monkeypatch):
+    def test_skipped_when_bypass_disabled(self, monkeypatch):
         monkeypatch.setattr(babelio, "_bypass_enabled", lambda: False)
-        fallback_calls = []
-        monkeypatch.setattr(
-            babelio, "_browser_fetch", lambda method, url, data: fallback_calls.append(1)
-        )
+        calls = []
+        monkeypatch.setattr(babelio, "_browser_fetch", lambda method, url, data: calls.append(1))
         get_metadata_cache().clear()
-        session = _BabelioSession({"recherche.php": CAPTCHA_HTML})
-        provider = _provider(session)
+        provider = BabelioProvider()
 
         assert provider.search(_search_options(query="horde")) == []
-        assert session.calls == 1
-        assert fallback_calls == []
+        assert calls == []
 
-    def test_get_book_on_captcha_returns_none(self, monkeypatch):
+    def test_get_book_on_a_browser_failure_returns_none(self, monkeypatch):
         monkeypatch.setattr(babelio, "_browser_fetch", lambda method, url, data: None)
         get_metadata_cache().clear()
-        session = _BabelioSession({"livres": CAPTCHA_HTML})
-        provider = _provider(session)
+        provider = BabelioProvider()
 
         assert provider.get_book("1892050") is None
 
 
-class TestBabelioBrowserMode:
-    """The circuit breaker: one 403, then browser-only until HTTP clears."""
-
-    def test_after_a_captcha_the_next_requests_skip_http(self, monkeypatch):
-        fallback_calls = []
-        monkeypatch.setattr(
-            babelio, "_browser_fetch", lambda m, u, d: fallback_calls.append(u) or SEARCH_HTML
-        )
-        get_metadata_cache().clear()
-        session = _BabelioSession({"recherche.php": CAPTCHA_HTML})
-        provider = _provider(session)
-
-        assert provider.search(_search_options(query="horde"))
-        assert session.calls == 1
-        assert babelio._http_challenged()
-
-        # Even a different query runs browser-only now: no more HTTP 403s
-        second = _BabelioSession({})
-        provider.session = second
-        assert provider.search(_search_options(query="damasio"))
-        assert second.calls == 0
-        assert len(fallback_calls) == 2
-
-    def test_a_clean_http_response_clears_the_browser_mode(self, monkeypatch):
-        monkeypatch.setattr(babelio, "_browser_fetch", lambda m, u, d: SEARCH_HTML)
-        get_metadata_cache().clear()
-        session = _BabelioSession({"recherche.php": CAPTCHA_HTML})
-        provider = _provider(session)
-
-        assert provider.search(_search_options(query="horde"))
-        assert babelio._http_challenged()
-
-        # The site is clean again: the next query gets plain HTTP back
-        babelio._mark_http_ok()
-        provider.session = _BabelioSession({"recherche.php": SEARCH_HTML})
-        assert provider.search(_search_options(query="horde"))
-        assert not babelio._http_challenged()
-
-    def test_mark_http_ok_clears_the_state(self):
-        babelio._mark_http_challenged()
-        assert babelio._http_challenged()
-
-        babelio._mark_http_ok()
-
-        assert not babelio._http_challenged()
-
-    def test_the_browser_mode_expires_after_its_window(self, monkeypatch):
-        now = [1000.0]
-        monkeypatch.setattr(babelio.time, "monotonic", lambda: now[0])
-
-        babelio._mark_http_challenged()
-        assert babelio._http_challenged()
-
-        now[0] += babelio._BROWSER_MODE_SECONDS - 1
-        assert babelio._http_challenged()
-
-        now[0] += 2
-        assert not babelio._http_challenged()
+# The real module-level fetch, captured before the autouse fixture swaps it
+# for the fake-session router: TestBabelioBrowserFetch tests this one itself
+_REAL_BROWSER_FETCH = babelio._browser_fetch
 
 
 class TestBabelioBrowserFetch:
@@ -558,6 +506,7 @@ class TestBabelioBrowserFetch:
         pytest.importorskip("seleniumbase")
         from shelfmark.bypass import internal_bypasser
 
+        monkeypatch.setattr(babelio, "_browser_fetch", _REAL_BROWSER_FETCH)
         calls = []
 
         def fake_get_bypassed_page(url):
@@ -588,6 +537,7 @@ class TestBabelioBrowserFetch:
     def test_browser_fetch_survives_a_missing_bypasser(self, monkeypatch):
         # None in sys.modules makes `import shelfmark.bypass.internal_bypasser` raise
         # ImportError, as it would on an install without the browser extra.
+        monkeypatch.setattr(babelio, "_browser_fetch", _REAL_BROWSER_FETCH)
         monkeypatch.setitem(__import__("sys").modules, "shelfmark.bypass.internal_bypasser", None)
         assert babelio._browser_fetch("GET", "https://www.babelio.com/livres/x/1", None) is None
 
