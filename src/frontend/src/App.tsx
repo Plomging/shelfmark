@@ -41,6 +41,7 @@ import { useRequests } from './hooks/useRequests';
 import { useSearch } from './hooks/useSearch';
 import { primeSettingsCache } from './hooks/useSettings';
 import { useToast } from './hooks/useToast';
+import { mergeMetadataBook } from './utils/bookTransformers';
 import { useExternalHashChange, useSyncUrlSearchHash, useUrlSearch } from './hooks/useUrlSearch';
 import { primeUsersCache } from './hooks/useUsersFetch';
 import { LoginPage } from './pages/LoginPage';
@@ -993,14 +994,7 @@ function App() {
     if (metadataBook) {
       try {
         const fullBook = await getMetadataBookInfo(metadataBook.provider, metadataBook.provider_id);
-        setSelectedBook({
-          ...metadataBook,
-          description: fullBook.description || metadataBook.description,
-          series_id: fullBook.series_id || metadataBook.series_id,
-          series_name: fullBook.series_name,
-          series_position: fullBook.series_position,
-          series_count: fullBook.series_count,
-        });
+        setSelectedBook(mergeMetadataBook(metadataBook, fullBook));
       } catch (error) {
         console.error('Failed to load book description, using search data:', error);
         setSelectedBook(metadataBook);
@@ -1615,14 +1609,7 @@ function App() {
           contentType: normalizedContentType,
         });
         const fullBook = await getMetadataBookInfo(book.provider, book.provider_id);
-        setReleaseBook({
-          ...book,
-          description: fullBook.description || book.description,
-          series_id: fullBook.series_id || book.series_id,
-          series_name: fullBook.series_name,
-          series_position: fullBook.series_position,
-          series_count: fullBook.series_count,
-        });
+        setReleaseBook(mergeMetadataBook(book, fullBook));
       } catch (error) {
         console.error('Failed to load book description, using search data:', error);
         policyTrace('universal.get:open_release_modal_fallback', {

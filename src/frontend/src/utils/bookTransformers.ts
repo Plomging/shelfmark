@@ -112,8 +112,7 @@ export function transformMetadataToBook(data: MetadataBookData): Book {
   };
 }
 
-const toOptionalText = (value: unknown): string | undefined => {
-  if (typeof value === 'string' && value.trim()) {
+const toOptionalText = (value: unknown): string | undefined => {  if (typeof value === 'string' && value.trim()) {
     return value.trim();
   }
   if (typeof value === 'number' && Number.isFinite(value)) {
@@ -196,4 +195,21 @@ export function transformReleaseToDirectBook(release: Release): Book {
 
 export function transformSourceRecordToBook(record: SourceRecordData): Book {
   return transformSourceBackedDataToBook(record);
+}
+
+/**
+ * Merge a full provider book over the search-result book it refines.
+ *
+ * The detail endpoint is richer (year, genres, ISBN, display fields...), but
+ * it is a different parse of the same book, so a field it does not carry must
+ * not erase the value the search card provided.
+ */
+export function mergeMetadataBook(base: Book, full: Book): Book {
+  const picked: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(full)) {
+    if (value !== undefined && value !== null) {
+      picked[key] = value;
+    }
+  }
+  return { ...base, ...picked };
 }
