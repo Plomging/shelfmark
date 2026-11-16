@@ -35,7 +35,9 @@ def _make_epub(path, opf=_MINIMAL_OPF):
             'media-type="application/oebps-package+xml"/></rootfiles></container>',
         )
         z.writestr("OEBPS/content.opf", opf)
-        z.writestr("OEBPS/ch1.xhtml", "<html><head><title>x</title></head><body><p>hi</p></body></html>")
+        z.writestr(
+            "OEBPS/ch1.xhtml", "<html><head><title>x</title></head><body><p>hi</p></body></html>"
+        )
 
 
 def _task(**overrides):
@@ -66,9 +68,7 @@ def metadata_enabled(monkeypatch):
     monkeypatch.setattr(
         config,
         "get",
-        lambda key, default=None, user_id=None: True
-        if key == "WRITE_EPUB_METADATA"
-        else default,
+        lambda key, default=None, user_id=None: True if key == "WRITE_EPUB_METADATA" else default,
     )
     return True
 
@@ -107,6 +107,67 @@ class TestWriteEpubMetadata:
             assert "9780441013593" in opf  # ISBN added as second identifier
             assert "Dune Saga" in opf  # calibre:series
             assert "calibre:series_index" in opf
+
+    def test_genres_become_dc_subjects(self, tmp_path, metadata_enabled):
+        path = tmp_path / "book.epub"
+        _make_epub(path)
+        write_epub_metadata(path, _task(book_data={"genres": ["Science fiction", "Aventure"]}))
+
+        with EPUB(path) as book:
+            soup = book.package_document.soup
+            subjects = [s.get_text(strip=True) for s in soup.find_all("dc:subject")]
+            assert subjects == ["Science fiction", "Aventure"]
+
+    def test_genres_replace_the_old_subjects(self, tmp_path, metadata_enabled):
+        opf = _MINIMAL_OPF.replace(
+            "<dc:language>en</dc:language>",
+            "<dc:language>en</dc:language>\n    <dc:subject>Old Genre</dc:subject>",
+        )
+        path = tmp_path / "book.epub"
+        _make_epub(path, opf=opf)
+        write_epub_metadata(path, _task(book_data={"genres": ["Science fiction"]}))
+
+        with EPUB(path) as book:
+            subjects = [
+                s.get_text(strip=True) for s in book.package_document.soup.find_all("dc:subject")
+            ]
+            assert subjects == ["Science fiction"]
+
+    def test_no_genres_writes_no_subject(self, tmp_path, metadata_enabled):
+        path = tmp_path / "book.epub"
+        _make_epub(path)
+        write_epub_metadata(path, _task(book_data={}))
+
+        with EPUB(path) as book:
+            assert book.package_document.soup.find_all("dc:subject") == []
+
+    def test_rating_written_as_calibre_meta(self, tmp_path, metadata_enabled):
+        path = tmp_path / "book.epub"
+        _make_epub(path)
+        write_epub_metadata(path, _task(book_data={"rating": 4.25}))
+
+        with EPUB(path) as book:
+            opf = str(book.package_document.soup)
+            assert "calibre:rating" in opf
+            assert "4.2" in opf
+            # The calibre prefix is declared for the rating alone, no series needed
+            assert "calibre: https://calibre-ebook.com" in opf
+
+    def test_out_of_range_rating_ignored(self, tmp_path, metadata_enabled):
+        path = tmp_path / "book.epub"
+        _make_epub(path)
+        write_epub_metadata(path, _task(book_data={"rating": 7}))
+
+        with EPUB(path) as book:
+            assert "calibre:rating" not in str(book.package_document.soup)
+
+    def test_unreadable_rating_ignored(self, tmp_path, metadata_enabled):
+        path = tmp_path / "book.epub"
+        _make_epub(path)
+        write_epub_metadata(path, _task(book_data={"rating": "n/a"}))
+
+        with EPUB(path) as book:
+            assert "calibre:rating" not in str(book.package_document.soup)
 
     def test_series_position_not_zero_padded(self, tmp_path, metadata_enabled):
         path = tmp_path / "book.epub"
@@ -188,8 +249,13 @@ class TestWriteEpubMetadata:
         path = tmp_path / "book.epub"
         _make_epub(path)
         task = _task(
-            title="Only Title", author=None, year=None, language=None,
-            series_name=None, series_position=None, subtitle=None,
+            title="Only Title",
+            author=None,
+            year=None,
+            language=None,
+            series_name=None,
+            series_position=None,
+            subtitle=None,
             book_data=None,
         )
         write_epub_metadata(path, task)
@@ -273,7 +339,9 @@ class TestRealEpubRegressions:
 
 
 class TestTransferIntegration:
-    def test_transfer_writes_metadata_before_transfer(self, tmp_path, monkeypatch, metadata_enabled):
+    def test_transfer_writes_metadata_before_transfer(
+        self, tmp_path, monkeypatch, metadata_enabled
+    ):
         from shelfmark.core.config import config
         from shelfmark.download.postprocess.transfer import transfer_book_files
 

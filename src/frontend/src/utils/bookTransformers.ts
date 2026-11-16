@@ -21,6 +21,7 @@ export interface MetadataBookData {
   publish_year?: number;
   language?: string;
   genres?: string[];
+  rating?: number; // Aggregate rating, 0-5 scale
   source_url?: string;
   display_fields?: Array<{
     label: string;
@@ -92,6 +93,7 @@ export function transformMetadataToBook(data: MetadataBookData): Book {
     isbn_10: data.isbn_10,
     isbn_13: data.isbn_13,
     genres: data.genres,
+    rating: data.rating,
     source_url: data.source_url,
     display_fields: data.display_fields,
     series_id: data.series_id,

@@ -206,6 +206,7 @@ class BookMetadata:
     publish_year: int | None = None
     language: str | None = None
     genres: list[str] = field(default_factory=list)
+    rating: float | None = None  # Provider's aggregate rating, 0-5 scale
     source_url: str | None = None  # Link to book on provider's site
     subtitle: str | None = None  # Book subtitle, if any
     search_title: str | None = None  # Cleaner title for search queries (provider-specific)

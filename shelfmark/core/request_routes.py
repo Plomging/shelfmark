@@ -173,7 +173,15 @@ def _build_release_result_data_from_book_data(
         # metadata writing) can access publisher, ISBNs, description...
         "book_data": {
             key: book_data.get(key)
-            for key in ("publisher", "isbn_10", "isbn_13", "description", "genres", "series_count")
+            for key in (
+                "publisher",
+                "isbn_10",
+                "isbn_13",
+                "description",
+                "genres",
+                "series_count",
+                "rating",
+            )
             if book_data.get(key) is not None
         },
         "search_mode": "direct",

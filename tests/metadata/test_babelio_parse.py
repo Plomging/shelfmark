@@ -181,9 +181,11 @@ class TestBabelioSearch:
             "https://www.babelio.com/livres/Francioso-Fondation-Deus-tome-1--Le-veilleur/1356017"
         )
         assert {f.label: f.value for f in book.display_fields} == {"Rating": "3.7"}
+        assert book.rating == 3.7  # structured rating for post-processing
         # A card without a rating or cover leaves both empty
         assert books[1].display_fields == []
         assert books[1].cover_url is None
+        assert books[1].rating is None
 
     def test_search_posts_the_query(self):
         get_metadata_cache().clear()
@@ -283,6 +285,7 @@ class TestBabelioBook:
             "Rating": "4.5",
             "Ratings": "89",
         }
+        assert book.rating == 4.47  # structured rating for post-processing
         # Any slug works: /livres/x/<id> redirects to the canonical one
         assert session.urls[0] == ("GET", "https://www.babelio.com/livres/x/1892050")
 

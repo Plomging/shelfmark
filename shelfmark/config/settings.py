@@ -1138,8 +1138,8 @@ def download_settings() -> list[SettingsField]:
             label="Write Metadata into EPUBs",
             description=(
                 "Embed known metadata (title, author, year, language, series, publisher, "
-                "ISBN, description) directly into downloaded EPUB files before delivery. "
-                "Files that cannot be updated are delivered unmodified."
+                "ISBN, description, genres, rating) directly into downloaded EPUB files "
+                "before delivery. Files that cannot be updated are delivered unmodified."
             ),
             default=False,
         ),

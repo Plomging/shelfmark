@@ -42,6 +42,7 @@ export interface Book {
   isbn_10?: string;
   isbn_13?: string;
   genres?: string[];
+  rating?: number; // Aggregate rating, 0-5 scale
   source_url?: string; // Link to book on provider's site
   display_fields?: DisplayField[]; // Provider-specific display data
   cover_aspect?: 'portrait' | 'square'; // Cover art aspect ratio hint

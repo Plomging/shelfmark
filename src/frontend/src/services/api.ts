@@ -565,6 +565,7 @@ export type DownloadReleasePayload = {
     description?: string;
     genres?: string[];
     series_count?: number;
+    rating?: number;
   };
   language?: string; // Release language code, for the {Language} naming variable
   search_author?: string;

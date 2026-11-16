@@ -71,6 +71,7 @@ export function buildReleaseDownloadPayload(
           description: book.description,
           genres: book.genres,
           series_count: book.series_count,
+          rating: book.rating,
         },
     // From the release, never the book: book.language is the provider's
     // canonical edition, which would mislabel a translated release.

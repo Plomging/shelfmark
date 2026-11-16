@@ -2,9 +2,10 @@
 
 An EPUB carries its metadata in the package document (content.opf). When the
 `WRITE_EPUB_METADATA` setting is enabled, downloaded EPUBs get their title,
-author, year, language, series and similar fields overwritten with what the
-task learned from the metadata providers, so library apps and e-readers show
-clean metadata instead of whatever the release source embedded.
+author, year, language, series, genres, aggregate rating and similar fields
+overwritten with what the task learned from the metadata providers, so library
+apps and e-readers show clean metadata instead of whatever the release source
+embedded.
 
 Editing uses `epublib`, which handles EPUBs non intrusively (it does not
 recreate the manifest or rewrite unrelated entries). Any failure is logged and
@@ -30,6 +31,9 @@ logger = setup_logger(__name__)
 
 #: Calibre-style series metadata, read by Calibre, Calibre-Web, KOReader...
 _SERIES_META_PROPERTIES = ("calibre:series", "calibre:series_index")
+
+#: Calibre-style aggregate rating, on the same 0-5 scale the providers use.
+_RATING_META_PROPERTY = "calibre:rating"
 
 
 def write_epub_metadata_enabled() -> bool:
@@ -68,6 +72,7 @@ def _clear_existing_values(book: BookMetadata, names: tuple[str, ...]) -> None:
         if refines and str(refines).lstrip("#") in stale_ids:
             book.remove_item(item)
 
+
 def _set_dc_value(book: BookMetadata, name: str, value: str | None) -> None:
     """Replace a Dublin Core metadata value, removing stale items first."""
     if not value or not str(value).strip():
@@ -96,6 +101,33 @@ def _declare_calibre_prefix(book: BookMetadata) -> None:
         package_tag["prefix"] = _CALIBRE_PREFIX_DECL
     elif "calibre:" not in existing:
         package_tag["prefix"] = f"{existing} {_CALIBRE_PREFIX_DECL}"
+
+
+def _set_subjects(book: BookMetadata, task: DownloadTask) -> None:
+    """Write the provider's genres as dc:subject entries, replacing old ones."""
+    raw_genres = (task.book_data or {}).get("genres")
+    if not isinstance(raw_genres, list):
+        return
+    genres = [str(genre).strip() for genre in raw_genres if str(genre).strip()]
+    if not genres:
+        return
+    _clear_existing_values(book, ("subject",))
+    for genre in genres:
+        book.add_dc("subject", genre)
+
+
+def _set_rating(book: BookMetadata, task: DownloadTask) -> None:
+    """Write the aggregate rating as a calibre:rating meta (0-5 scale)."""
+    raw_rating = (task.book_data or {}).get("rating")
+    try:
+        rating = float(raw_rating)  # type: ignore[arg-type]
+    except TypeError, ValueError:
+        return
+    if not 0 < rating <= 5:
+        return
+    _clear_existing_values(book, (_RATING_META_PROPERTY,))
+    book.add(_RATING_META_PROPERTY, f"{rating:.1f}")
+    _declare_calibre_prefix(book)
 
 
 def _set_series_metadata(book: BookMetadata, task: DownloadTask) -> None:
@@ -130,7 +162,7 @@ def _set_subtitle(book: BookMetadata, task: DownloadTask) -> None:
             refines=f"#{item.id}",
         )
         book.add_item(refines)
-    except (AttributeError, KeyError, TypeError):
+    except AttributeError, KeyError, TypeError:
         logger.debug("Could not tag subtitle item; keeping plain second dc:title")
 
 
@@ -180,6 +212,8 @@ def _write_epub_metadata_inner(path: Path, task: DownloadTask) -> bool:
                 metadata.add_dc("identifier", str(isbn).strip())
             _set_series_metadata(metadata, task)
             _set_subtitle(metadata, task)
+            _set_subjects(metadata, task)
+            _set_rating(metadata, task)
 
             # Cover embedding: download/cache the cover, add it as a resource with
             # book.resources.add(create_resource_from_path(...)), then promote it

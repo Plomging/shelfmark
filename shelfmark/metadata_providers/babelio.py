@@ -535,6 +535,7 @@ class BabelioProvider(MetadataProvider):
                 )
                 if rating:
                     display_fields.append(DisplayField(label="Rating", value=rating, icon="star"))
+                structured_rating = float(rating) if rating and 0 < float(rating) <= 5 else None
 
                 cover = card.find("img", src=True)
                 source_url = str(title_link.get("href") or "") if title_link else ""
@@ -551,6 +552,7 @@ class BabelioProvider(MetadataProvider):
                         search_title=title,
                         search_author=authors[0] if authors else None,
                         display_fields=display_fields,
+                        rating=structured_rating,
                     )
                 )
         return books
@@ -647,6 +649,9 @@ class BabelioProvider(MetadataProvider):
             display_fields.append(
                 DisplayField(label="Ratings", value=f"{int(rating_count):,}", icon="users")
             )
+        # Structured rating for post-processing (EPUB calibre:rating); the
+        # display field above stays for the UI cards
+        structured_rating = rating_value if rating_value and 0 < rating_value <= 5 else None
 
         # The JSON-LD genre list is the site's own curated set (the breadcrumb
         # mixes in editorial selections like 'best of' lists); the breadcrumb is
@@ -677,6 +682,7 @@ class BabelioProvider(MetadataProvider):
             description=description,
             publisher=publisher or None,
             publish_year=publish_year,
+            rating=structured_rating,
             source_url=_absolute_url(str(data.get("url", ""))) or _book_url(book_id),
             search_title=title,
             search_author=authors[0],
