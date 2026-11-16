@@ -60,6 +60,18 @@ export function buildReleaseDownloadPayload(
     series_name: book.series_name,
     series_position: book.series_position,
     subtitle: book.subtitle,
+    // Full provider record for post-processing features like EPUB metadata
+    // writing: publisher, ISBNs, description, genres.
+    book_data: isManual
+      ? undefined
+      : {
+          publisher: book.publisher,
+          isbn_10: book.isbn_10,
+          isbn_13: book.isbn_13,
+          description: book.description,
+          genres: book.genres,
+          series_count: book.series_count,
+        },
     // From the release, never the book: book.language is the provider's
     // canonical edition, which would mislabel a translated release.
     language: release.language ?? undefined,

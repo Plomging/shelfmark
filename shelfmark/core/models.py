@@ -145,6 +145,11 @@ class DownloadTask:
         True  # Whether the source can restart without a preserved staged file
     )
 
+    # Full metadata-provider record (publisher, ISBN, description...) for post-
+    # processing features that need more than the naming fields, e.g. writing
+    # metadata into EPUBs. Captured at queue time like the naming fields.
+    book_data: dict[str, Any] | None = None
+
     # Series info (for library naming templates)
     series_name: str | None = None
     series_position: float | None = None  # Float for novellas (e.g., 1.5)

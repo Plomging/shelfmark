@@ -557,6 +557,15 @@ export type DownloadReleasePayload = {
   series_name?: string;
   series_position?: number;
   subtitle?: string;
+  /** Full provider record for post-processing (EPUB metadata writing). */
+  book_data?: {
+    publisher?: string;
+    isbn_10?: string;
+    isbn_13?: string;
+    description?: string;
+    genres?: string[];
+    series_count?: number;
+  };
   language?: string; // Release language code, for the {Language} naming variable
   search_author?: string;
   search_mode?: 'direct' | 'universal';

@@ -30,6 +30,7 @@ dependencies = [
     # requests cannot speak. See shelfmark/download/doh_wireformat.py.
     "httpx[http2]>=0.28.1",
     "publicsuffixlist>=1.1.2.20261109",
+    "epublib>=0.1.7",
 ]
 
 [project.optional-dependencies]
