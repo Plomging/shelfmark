@@ -884,3 +884,133 @@ def test_post_reports_a_non_200_status(monkeypatch):
         asyncio.run(internal_bypasser._post("https://www.babelio.com/recherche.php", {}, _Driver()))
         == ""
     )
+
+
+def test_plain_http_is_blocked_for_babelio(monkeypatch):
+    import shelfmark.bypass.internal_bypasser as internal_bypasser
+
+    # babelio.com scores client fingerprints even when serving 200, so no plain
+    # request may ever be sent to it - not even one replaying browser cookies
+    def _fail(*_args, **_kwargs):
+        raise AssertionError("a plain HTTP request was sent to babelio.com")
+
+    monkeypatch.setattr(internal_bypasser.requests, "get", _fail)
+    monkeypatch.setattr(
+        internal_bypasser, "get_cf_cookies_for_domain", lambda _d: {"cf_clearance": "abc"}
+    )
+
+    assert (
+        internal_bypasser._try_with_cached_cookies("https://www.babelio.com/", "www.babelio.com")
+        is None
+    )
+    # Subdomains are covered too, and unrelated hosts stay on the normal path
+    assert internal_bypasser._plain_http_blocked("https://forum.babelio.com/livres")
+    assert not internal_bypasser._plain_http_blocked("https://annas-archive.gl/search")
+
+
+def test_seed_cached_cookies_replays_the_store_into_a_fresh_browser(monkeypatch):
+    import shelfmark.bypass.cookie_store as cookie_store
+    import shelfmark.bypass.internal_bypasser as internal_bypasser
+
+    cookie_store._cf_cookies["babelio.com"] = {
+        "p": {
+            "value": "old-session",
+            "domain": ".babelio.com",
+            "path": "/",
+            "expiry": None,
+            "secure": False,
+            "httpOnly": True,
+        },
+        "dead": {
+            "value": "gone",
+            "domain": ".babelio.com",
+            "path": "/",
+            "expiry": 1,
+            "secure": False,
+            "httpOnly": True,
+        },
+    }
+    seeded = []
+
+    class FakeCookieParam:
+        def __init__(self, **kwargs):
+            self.__dict__.update(kwargs)
+
+    class FakeCookies:
+        async def set_all(self, cookies):
+            seeded.extend(cookies)
+
+    class FakeDriver:
+        cookies = FakeCookies()
+
+    monkeypatch.setattr(internal_bypasser.cdp.network, "CookieParam", FakeCookieParam)
+
+    asyncio.run(internal_bypasser._seed_cached_cookies(FakeDriver(), "https://www.babelio.com/"))
+
+    # The expired cookie is filtered out, the live one seeded with its metadata
+    assert len(seeded) == 1
+    cookie = seeded[0]
+    assert cookie.name == "p"
+    assert cookie.value == "old-session"
+    assert cookie.domain == ".babelio.com"
+    assert cookie.path == "/"
+
+
+def test_seed_cached_cookies_is_a_noop_without_a_store():
+    import shelfmark.bypass.internal_bypasser as internal_bypasser
+
+    class FakeCookies:
+        async def set_all(self, cookies):
+            raise AssertionError("set_all should not be called")
+
+    class FakeDriver:
+        cookies = FakeCookies()
+
+    asyncio.run(internal_bypasser._seed_cached_cookies(FakeDriver(), "https://example.com/"))
+
+
+def test_babelio_session_cookies_are_extracted_in_full(monkeypatch):
+    import time
+
+    import shelfmark.bypass.cookie_store as cookie_store
+    import shelfmark.bypass.internal_bypasser as internal_bypasser
+
+    class FakeCookie:
+        def __init__(self, name, value, domain, path, expires, secure=True):
+            self.name = name
+            self.value = value
+            self.domain = domain
+            self.path = path
+            self.expires = expires
+            self.secure = secure
+
+    class FakeCookies:
+        async def get_all(self, requests_cookie_format=False):
+            assert requests_cookie_format is True
+            return [
+                FakeCookie("cf_clearance", "abc", "babelio.com", "/", int(time.time()) + 3600),
+                FakeCookie("g_state", "stored", "babelio.com", "/", int(time.time()) + 3600),
+            ]
+
+    class FakeDriver:
+        cookies = FakeCookies()
+
+    class FakePage:
+        async def evaluate(self, _expr):
+            return "TestUA/1.0"
+
+    monkeypatch.setattr(
+        cookie_store, "_get_full_cookie_domains", lambda: set(cookie_store.FULL_SESSION_DOMAINS)
+    )
+
+    internal_bypasser.clear_cf_cookies()
+    asyncio.run(
+        internal_bypasser._extract_cookies_from_cdp(
+            FakeDriver(),
+            FakePage(),
+            "https://www.babelio.com/",
+        )
+    )
+
+    cookies = internal_bypasser.get_cf_cookies_for_domain("babelio.com")
+    assert cookies == {"cf_clearance": "abc", "g_state": "stored"}

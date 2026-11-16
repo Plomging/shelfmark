@@ -62,6 +62,13 @@ DDG_EPHEMERAL_COOKIE_NAMES = {
     "ddg_last_challenge",
 }
 
+# Hosts with no clearance cookie to win, read page by page. Their whole session
+# is still worth keeping so a later browser can pick up where the last one left
+# off - a returning visitor, not a first-timer to challenge. babelio.com is the
+# case that put them here: its anti-bot gates pages on reputation, and its
+# session cookies (g_state, p, jstsToken...) are what keeps a browser welcome.
+FULL_SESSION_DOMAINS = frozenset({"babelio.com"})
+
 
 def _get_base_domain(domain: str) -> str:
     """Extract base domain from hostname (e.g., 'www.example.com' -> 'example.com')."""
@@ -69,10 +76,10 @@ def _get_base_domain(domain: str) -> str:
 
 
 def _get_full_cookie_domains() -> set[str]:
-    """Return mirror domains that need full-session cookie extraction."""
+    """Return domains that need full-session cookie extraction."""
     from shelfmark.core.mirrors import get_zlib_cookie_domains
 
-    return {_get_base_domain(domain) for domain in get_zlib_cookie_domains()}
+    return {_get_base_domain(domain) for domain in get_zlib_cookie_domains()} | FULL_SESSION_DOMAINS
 
 
 def _replay_per_check_cookies() -> bool:
@@ -235,6 +242,25 @@ def get_cf_cookies_for_domain(domain: str) -> dict[str, str]:
                 _cf_cookies.pop(base_domain, None)
 
         return {name: c["value"] for name, c in live.items()}
+
+
+def get_cf_cookie_params_for_domain(domain: str) -> list[dict[str, Any]]:
+    """Stored cookie metadata (name, value, domain, path...) for a domain.
+
+    ``get_cf_cookies_for_domain``'s name-to-value dict is enough to replay a
+    clearance over plain requests, but seeding a real browser session needs
+    each cookie's domain and path back.
+    """
+    if not domain:
+        return []
+    base_domain = _get_base_domain(domain)
+    with _cf_cookies_lock:
+        stored = dict(_cf_cookies.get(base_domain, {}))
+    return [
+        {**cookie, "name": name}
+        for name, cookie in stored.items()
+        if not _is_cookie_expired(cookie)
+    ]
 
 
 def has_valid_cf_cookies(domain: str) -> bool:

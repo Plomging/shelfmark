@@ -23,6 +23,7 @@ from threading import Event
 from typing import Any, Protocol, TypedDict, TypeGuard
 from urllib.parse import urlencode, urlparse
 
+import mycdp as cdp
 import requests
 from seleniumbase import cdp_driver
 from seleniumbase.undetected.cdp_driver.connection import ProtocolException
@@ -36,6 +37,7 @@ from shelfmark.bypass.challenge import (
 from shelfmark.bypass.cookie_store import (
     clear_cf_cookies,
     export_store,
+    get_cf_cookie_params_for_domain,
     get_cf_cookies_for_domain,
     get_cf_user_agent_for_domain,
     import_store,
@@ -286,6 +288,38 @@ class _CdpWorker:
 
 
 _CDP_WORKER = _CdpWorker()
+
+
+async def _seed_cached_cookies(driver: Any, url: str) -> None:
+    """Load the cookie store's session into a freshly started Chrome.
+
+    A brand-new incognito browser looks like a first-time visitor; replaying
+    the cookies a previous solve or visit won makes it a returning one, which
+    keeps browser-only hosts from challenging every new browser. Best effort:
+    any failure just means the browser navigates clean.
+    """
+    hostname = urlparse(url).hostname or ""
+    stored = get_cf_cookie_params_for_domain(hostname)
+    if not stored:
+        return
+    params = [
+        cdp.network.CookieParam(
+            name=str(cookie.get("name") or ""),
+            value=str(cookie.get("value") or ""),
+            domain=str(cookie.get("domain") or hostname),
+            path=str(cookie.get("path") or "/"),
+            secure=bool(cookie.get("secure")),
+        )
+        for cookie in stored
+        if cookie.get("name") and cookie.get("value") is not None
+    ]
+    if not params:
+        return
+    try:
+        await driver.cookies.set_all(params)
+        logger.debug("Seeded %d stored cookies into Chrome for %s", len(params), hostname)
+    except _CDP_OPERATION_ERRORS as e:
+        logger.debug("Could not seed cached cookies for %s: %s", hostname, type(e).__name__)
 
 
 async def _extract_cookies_from_cdp(driver: Any, page: Any, url: str) -> None:
@@ -940,6 +974,7 @@ async def _get(url: str, driver: Any, cancel_flag: Event | None = None) -> str:
     logger.debug("CDP_GET: %s", url)
 
     logger.debug("Opening URL with SeleniumBase CDP...")
+    await _seed_cached_cookies(driver, url)
     page = await driver.get(url)
     with suppress(Exception):
         await page.wait()
@@ -1459,6 +1494,7 @@ async def _post(
     _check_cancellation(cancel_flag, "Bypass cancelled before POST")
 
     origin = f"{urlparse(url).scheme}://{urlparse(url).netloc}/"
+    await _seed_cached_cookies(driver, origin)
     page = await driver.get(origin)
     with suppress(Exception):
         await page.wait()
@@ -1758,8 +1794,33 @@ def _stop_ffmpeg_recording() -> None:
     DISPLAY["ffmpeg_error_log"] = None
 
 
+# Hosts whose anti-bot scores client fingerprints even when it serves 200, so
+# a plain request - Python's TLS fingerprint wearing a borrowed User-Agent -
+# builds suspicion on every call until the host reacts (Babelio escalated to a
+# firewall ban). Only real Chrome may talk to them: the cached-cookie HTTP
+# shortcut is off for these, and their pages are always fetched by the browser.
+_PLAIN_HTTP_BLOCKED_DOMAINS = frozenset({"babelio.com"})
+
+
+def _plain_http_blocked(url: str) -> bool:
+    """Whether this URL's host refuses non-browser clients outright."""
+    hostname = urlparse(url).hostname or ""
+    return any(
+        hostname == domain or hostname.endswith(f".{domain}")
+        for domain in _PLAIN_HTTP_BLOCKED_DOMAINS
+    )
+
+
 def _try_with_cached_cookies(url: str, hostname: str) -> str | None:
     """Attempt request with cached cookies before using Chrome."""
+    if _plain_http_blocked(url):
+        # These hosts score client fingerprints even when serving 200: Python's
+        # TLS fingerprint, no matter which User-Agent it borrows, is what a
+        # reputation-driven interstitial (and eventually a firewall ban) reacts
+        # to. Only real Chrome may talk to them.
+        logger.debug("Browser-only host, skipping the plain HTTP attempt: %s", url)
+        return None
+
     cookies = get_cf_cookies_for_domain(hostname)
     if not cookies:
         return None

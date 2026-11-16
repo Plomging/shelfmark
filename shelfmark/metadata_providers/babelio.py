@@ -3,6 +3,11 @@
 babelio.com has no public API, so this reads the web pages. Book pages carry
 schema.org JSON-LD, which is the primary source; the rest is HTML.
 
+Every request goes through the internal browser bypasser: the site's anti-bot
+scores client fingerprints even when it serves 200, and a plain request carries
+Python's TLS fingerprint whatever User-Agent it borrows - enough of them ends
+in a firewall ban. Real Chrome is the only client this site tolerates.
+
 Pages used (ids are the number at the end of the path; the site redirects
 ``/livres/x/<id>`` to the canonical slug URL):
     POST /recherche.php    book search (form ``Recherche=<query>``), first page
@@ -11,7 +16,6 @@ Pages used (ids are the number at the end of the path; the site redirects
 
 import json
 import re
-import time
 import unicodedata
 from typing import Any, ClassVar
 from urllib.parse import urljoin
@@ -28,7 +32,6 @@ from shelfmark.core.settings_registry import (
     SettingsField,
     register_settings,
 )
-from shelfmark.download.network import get_proxies, get_ssl_verify
 from shelfmark.metadata_providers import (
     BookMetadata,
     DisplayField,
@@ -40,7 +43,6 @@ from shelfmark.metadata_providers import (
     TextSearchField,
     register_provider,
 )
-from shelfmark.metadata_providers.openlibrary import RateLimiter
 
 logger = setup_logger(__name__)
 
@@ -51,31 +53,10 @@ BABELIO_BOOK_URL = f"{BABELIO_BASE_URL}/livres"
 # returns the full summary the page only shows truncated
 BABELIO_RESUME_URL = f"{BABELIO_BASE_URL}/aj_voir_plus_a.php"
 
-# The site publishes no limit; stay well below anything a reader would notice.
-# Kept low after an IP got firewall-banned for a burst of lookups - quiet,
-# spread-out scraping is what keeps the provider usable.
-RATE_LIMIT_REQUESTS = 10
-RATE_LIMIT_WINDOW_SECONDS = 60
-
-REQUEST_HEADERS = {
-    "User-Agent": ("Mozilla/5.0 (X11; Linux x86_64; rv:128.0) Gecko/20100101 Firefox/128.0"),
-    "Accept": "text/html,application/xhtml+xml",
-    "Accept-Language": "fr-FR,fr;q=0.9",
-}
-
 # Babelio's own anti-bot interstitial (not Cloudflare): a "Vérification de
-# sécurité" page with a slider captcha. It is IP-reputation driven: a flagged
-# address is challenged on every plain HTTP request, so the first one switches
-# to browser-only mode instead of retrying into the same 403 again - repeated
-# 403s are exactly what escalates to a firewall ban.
+# sécurité" page with a slider captcha. It is reputation-driven and can also
+# serve real Chrome intermittently, so browser answers still get screened.
 CAPTCHA_MARKERS = ("vérification de sécurité", "slider-track")
-
-# After a captcha on plain HTTP, every request goes straight to the browser
-# bypasser for this long: the flagged session keeps being challenged, so
-# spending a 403 on each request buys nothing and risks the ban. Kept in
-# process memory only; one clean HTTP response clears it.
-_BROWSER_MODE_SECONDS = 15 * 60
-_browser_mode_until = 0.0
 
 ISBN_13_LENGTH = 13
 # The search POST has no known page parameter; only the first page is fetched
@@ -110,8 +91,6 @@ _CARD_LAYOUTS = {
     "lv-item": ("lv-title", "lv-note"),
     "book-card": ("book-card-title", "book-card-badge"),
 }
-
-_rate_limiter = RateLimiter(RATE_LIMIT_REQUESTS, RATE_LIMIT_WINDOW_SECONDS)
 
 
 def _clean_text(value: str | None) -> str:
@@ -168,29 +147,6 @@ def _valid_isbn(candidate: str | None) -> str | None:
     if re.fullmatch(r"\d{9}[\dX]", digits):
         return digits
     return None
-
-
-def _http_challenged() -> bool:
-    """Whether plain HTTP is known to be challenged right now."""
-    return time.monotonic() < _browser_mode_until
-
-
-def _mark_http_challenged() -> None:
-    """Switch to browser-only mode: stop paying a 403 on every request."""
-    global _browser_mode_until
-    _browser_mode_until = time.monotonic() + _BROWSER_MODE_SECONDS
-    logger.warning(
-        "Babelio is challenging plain HTTP requests; browser-only mode for %d min",
-        _BROWSER_MODE_SECONDS // 60,
-    )
-
-
-def _mark_http_ok() -> None:
-    """A clean HTTP response clears the challenge state."""
-    global _browser_mode_until
-    if _http_challenged():
-        logger.info("Babelio answers plain HTTP again; leaving browser-only mode")
-    _browser_mode_until = 0.0
 
 
 def _bypass_enabled() -> bool:
@@ -393,76 +349,55 @@ class BabelioProvider(MetadataProvider):
 
     def __init__(self) -> None:
         """Initialize provider."""
-        self.session = requests.Session()
-        self.session.headers.update(REQUEST_HEADERS)
+        # No HTTP session on purpose: every request goes through the browser
+        # bypasser (see `_request`).
 
     def is_available(self) -> bool:
         """Babelio needs no authentication."""
         return True
 
-    def _fetch(self, url: str, timeout: int = 15) -> str | None:
-        return self._request("GET", url, timeout=timeout)
+    def _fetch(self, url: str) -> str | None:
+        return self._request("GET", url)
 
-    def _search_post(self, query: str, timeout: int = 15) -> str | None:
+    def _search_post(self, query: str) -> str | None:
         """Run a site search and return the results page, or None on failure."""
         return self._request(
             "POST",
             BABELIO_SEARCH_URL,
             data={"Recherche": query, "recherche": "OK"},
-            timeout=timeout,
         )
 
     def _request(self, method: str, url: str, **kwargs: Any) -> str | None:
-        """Perform one plain HTTP request, falling back to the browser past the captcha.
+        """Fetch through the browser bypasser, always.
 
-        A flagged address is challenged on every plain HTTP request, so there is
-        no point retrying one: the first captcha switches to browser-only mode
-        (see `_mark_http_challenged`), whose real Chrome Babelio does not
-        challenge. The switch clears itself on the first clean HTTP response.
+        Babelio's anti-bot scores client fingerprints even when it serves 200:
+        a plain request carries Python's TLS fingerprint no matter which
+        User-Agent it claims, and enough of those earned us a firewall ban.
+        Real Chrome is the only client this site tolerates, so it is the only
+        one used - there is no plain-HTTP path left at all.
         """
-        if _http_challenged():
-            return self._browser_fallback(method, url, kwargs.get("data"))
-        _rate_limiter.wait_if_needed()
-        try:
-            response = self.session.request(
-                method,
-                url,
-                verify=get_ssl_verify(url),
-                proxies=get_proxies(url),
-                **kwargs,
-            )
-        except requests.Timeout:
-            logger.warning("Babelio request timed out: %s", url)
-            return None
-        except requests.RequestException as e:
-            logger.warning("Babelio request failed: %s (%s)", url, e.__class__.__name__)
-            return None
-        if response.status_code == 403 or _is_captcha_page(response.text):
-            _mark_http_challenged()
-            return self._browser_fallback(method, url, kwargs.get("data"))
-        if response.status_code >= 400:
-            logger.warning("Babelio request failed: HTTP %s for %s", response.status_code, url)
-            return None
-        _mark_http_ok()
-        return response.text
+        return self._browser_request(method, url, kwargs.get("data"))
 
-    def _browser_fallback(self, method: str, url: str, data: dict[str, str] | None) -> str | None:
-        """Fetch through the internal browser bypasser when HTTP keeps being challenged."""
+    def _browser_request(self, method: str, url: str, data: dict[str, str] | None) -> str | None:
+        """Fetch through the internal browser bypasser and screen the answer.
+
+        GETs use the bypasser directly; form POSTs run as a sync XHR inside its
+        cleared page. The interstitial can also be served intermittently to
+        real Chrome, and Chrome's own error pages surface as long bodies the
+        bypasser mistakes for content, so both get one more fetch before giving
+        up.
+        """
         if not _bypass_enabled():
             logger.warning(
-                "Babelio is showing its security captcha and the browser bypasser is "
-                "disabled. Enable Cloudflare bypass in Settings, or try again later."
+                "Babelio is only reachable through the browser bypasser and it is "
+                "disabled. Enable Cloudflare bypass in Settings."
             )
             return None
-        logger.info("Babelio captcha persists; retrying through the browser bypasser: %s", url)
         for attempt in (1, 2):
             html = _browser_fetch(method, url, data)
             if html and not _is_captcha_page(html) and not _is_browser_error_page(html):
                 return html
             if attempt == 1:
-                # The site serves its interstitial intermittently, even to real
-                # Chrome, and Chrome's own error pages surface as long bodies the
-                # bypasser mistakes for content. Both are worth one more fetch.
                 reason = "its security captcha" if html and _is_captcha_page(html) else "no page"
                 logger.info("Babelio browser bypasser received %s; retrying once", reason)
         logger.warning("Babelio browser bypasser returned no usable page for %s", url)
@@ -785,8 +720,8 @@ def _test_babelio_connection() -> dict[str, Any]:
         return {
             "success": False,
             "message": (
-                "babelio.com blocked every attempt, including the browser bypasser "
-                "(its security captcha). Check that the Cloudflare bypass is enabled "
+                "babelio.com only accepts real browsers and the browser bypasser "
+                "returned nothing. Check that the Cloudflare bypass is enabled "
                 "and its browser dependencies are installed, then retry."
             ),
         }
@@ -805,9 +740,9 @@ def babelio_settings() -> list[SettingsField]:
             description=(
                 "French community book catalog with excellent coverage of French editions "
                 "and translations. No API key required. It has no public API, so Shelfmark "
-                "reads the web pages. Its security captcha gates plain HTTP requests, so "
-                "searches automatically go through the browser bypasser; each lookup "
-                "therefore takes a little longer, and the results are cached."
+                "reads the web pages. Its anti-bot only tolerates real browsers, so every "
+                "request goes through the browser bypasser; each lookup therefore takes a "
+                "little longer, and the results are cached."
             ),
             link_url=BABELIO_BASE_URL,
             link_text="babelio.com",
