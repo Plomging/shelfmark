@@ -6,6 +6,10 @@ from pathlib import Path
 import pytest
 
 
+async def _no_sleep(_seconds) -> None:
+    return None
+
+
 def test_diamwall_is_detected_until_the_challenge_clears():
     import shelfmark.bypass.internal_bypasser as internal_bypasser
 
@@ -816,7 +820,9 @@ def test_post_aborts_when_the_origin_page_is_a_challenge(monkeypatch):
         async def get_title(self):
             return "Vérification de sécurité"
 
-        async def evaluate(self, _js):  # pragma: no cover - must not be reached
+        async def evaluate(self, js):  # the slider probe is fine, the XHR is not
+            if "dataset.dragDistance" in js:
+                return None  # no slider on this challenged page
             raise AssertionError("XHR must not run on a challenged page")
 
     class _Driver:
@@ -1014,3 +1020,97 @@ def test_babelio_session_cookies_are_extracted_in_full(monkeypatch):
 
     cookies = internal_bypasser.get_cf_cookies_for_domain("babelio.com")
     assert cookies == {"cf_clearance": "abc", "g_state": "stored"}
+
+
+def _slider_page(infos, challenge_answers=None):
+    """Fake CDP page: answers the slider probes and records every mouse event."""
+    events = []
+    evaluates = []
+    remaining = list(infos)
+    answers = list(challenge_answers or [])
+
+    class FakePage:
+        async def evaluate(self, js):
+            evaluates.append(js)
+            if "dataset.dragDistance" in js:
+                return remaining.pop(0) if remaining else None
+            return answers.pop(0) if answers else False
+
+        async def send(self, command):
+            # CDP commands are generators yielding {method, params}; consume
+            # them the way the real tab does and keep the params for asserts.
+            params = next(command)["params"]
+            command.close()
+            events.append(params)
+            return {}
+
+    return FakePage(), events, evaluates
+
+
+def test_babelio_slider_solves_the_challenge_with_real_mouse_events(monkeypatch):
+    import shelfmark.bypass.internal_bypasser as internal_bypasser
+
+    monkeypatch.setattr(internal_bypasser.asyncio, "sleep", _no_sleep)
+    page, events, evaluates = _slider_page([{"distance": 147, "thumbX": 395.0, "thumbY": 540.0}])
+
+    assert asyncio.run(
+        internal_bypasser._solve_babelio_slider(page, "https://www.babelio.com/livres/x/1")
+    )
+
+    assert events[0]["type"] == "mousePressed"
+    assert events[-1]["type"] == "mouseReleased"
+    assert sum(e["type"] == "mouseMoved" for e in events) >= 25
+    # The drag starts on the thumb and lands near start + the site's distance
+    assert events[0]["x"] == 395.0
+    assert abs(events[-1]["x"] - (395.0 + 147)) <= 10
+    assert len(evaluates) == 2  # info probe + challenge check
+
+
+def test_babelio_slider_retries_with_a_fresh_distance(monkeypatch):
+    import shelfmark.bypass.internal_bypasser as internal_bypasser
+
+    monkeypatch.setattr(internal_bypasser.asyncio, "sleep", _no_sleep)
+    page, events, evaluates = _slider_page(
+        [
+            {"distance": 147, "thumbX": 395.0, "thumbY": 540.0},
+            {"distance": 209, "thumbX": 364.0, "thumbY": 531.0},
+        ],
+        challenge_answers=[True, False],
+    )
+
+    assert asyncio.run(internal_bypasser._solve_babelio_slider(page, "https://www.babelio.com/"))
+    presses = [e for e in events if e["type"] == "mousePressed"]
+    releases = [e for e in events if e["type"] == "mouseReleased"]
+    assert len(presses) == 2 and len(releases) == 2
+    assert presses[1]["x"] == 364.0
+    assert abs(releases[1]["x"] - (364.0 + 209)) <= 10
+    assert len(evaluates) == 4  # 2 info probes + 2 challenge checks
+
+
+def test_babelio_slider_skipped_for_other_hosts():
+    import shelfmark.bypass.internal_bypasser as internal_bypasser
+
+    class FakePage:
+        async def evaluate(self, _js):
+            raise AssertionError("the slider solver must not touch other hosts")
+
+    assert not asyncio.run(
+        internal_bypasser._solve_babelio_slider(FakePage(), "https://example.com/")
+    )
+
+
+def test_babelio_slider_noop_without_a_slider(monkeypatch):
+    import shelfmark.bypass.internal_bypasser as internal_bypasser
+
+    monkeypatch.setattr(internal_bypasser.asyncio, "sleep", _no_sleep)
+
+    class FakePage:
+        async def evaluate(self, _js):
+            return None
+
+        async def send(self, _event):
+            raise AssertionError("no mouse events expected without a slider")
+
+    assert not asyncio.run(
+        internal_bypasser._solve_babelio_slider(FakePage(), "https://www.babelio.com/")
+    )

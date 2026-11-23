@@ -25,6 +25,7 @@ from urllib.parse import urlencode, urlparse
 
 import mycdp as cdp
 import requests
+from mycdp import input_ as cdp_input
 from seleniumbase import cdp_driver
 from seleniumbase.undetected.cdp_driver.connection import ProtocolException
 
@@ -967,6 +968,98 @@ async def _wait_for_aa_download_page(
         ) from exc
 
 
+_BABELIO_SLIDER_INFO_JS = """
+(() => {
+  const track = document.querySelector('#slider-track');
+  const thumb = document.querySelector('#slider-thumb');
+  if (!track || !thumb) return null;
+  const t = track.getBoundingClientRect();
+  const h = thumb.getBoundingClientRect();
+  return {
+    distance: parseInt(track.dataset.dragDistance || '0', 10),
+    thumbX: h.x + h.width / 2,
+    thumbY: h.y + h.height / 2,
+  };
+})()
+"""
+
+_BABELIO_HAS_SLIDER_JS = "(() => !!document.querySelector('#slider-track'))()"
+
+
+async def _solve_babelio_slider(page: Any, url: str) -> bool:
+    """Drag Babelio's reputation slider until the real page is served.
+
+    The interstitial publishes its own drag distance in `data-drag-distance`,
+    so the gesture is deterministic. A failed drag makes the site reload with
+    a fresh challenge and a new distance, hence the bounded retry loop that
+    re-reads the DOM every time. Only Babelio is handled: every other host's
+    protection stays with the generic bypass methods.
+    """
+    if not _plain_http_blocked(url):
+        return False
+    for attempt in range(3):
+        try:
+            info = await page.evaluate(_BABELIO_SLIDER_INFO_JS)
+        except _CDP_OPERATION_ERRORS:
+            return False
+        if not isinstance(info, dict) or not info.get("distance"):
+            return False
+
+        distance = int(info["distance"])
+        start_x = float(info["thumbX"])
+        start_y = float(info["thumbY"])
+        logger.info("Babelio slider: drag %dpx (attempt %d/3)", distance, attempt + 1)
+        try:
+            await page.send(
+                cdp_input.dispatch_mouse_event(
+                    "mousePressed",
+                    x=start_x,
+                    y=start_y,
+                    button=cdp_input.MouseButton.LEFT,
+                    click_count=1,
+                )
+            )
+            overshoot = _RNG.uniform(3, 8) * _RNG.choice((-1, 1))
+            target_x = start_x + distance + overshoot
+            steps = _RNG.randint(25, 40)
+            for step in range(steps + 1):
+                t = step / steps
+                eased = 0.5 - 0.5 * (1 - 2 * t) ** 2 if t < 0.5 else 0.5 + 0.5 * (2 * t - 1) ** 2
+                await page.send(
+                    cdp_input.dispatch_mouse_event(
+                        "mouseMoved",
+                        x=start_x + (target_x - start_x) * eased,
+                        y=start_y + _RNG.uniform(-1.5, 1.5),
+                    )
+                )
+                await asyncio.sleep(_RNG.uniform(0.008, 0.035))
+            final_x = start_x + distance + _RNG.uniform(-2, 2)
+            for _ in range(2):
+                await page.send(cdp_input.dispatch_mouse_event("mouseMoved", x=final_x, y=start_y))
+            await page.send(
+                cdp_input.dispatch_mouse_event(
+                    "mouseReleased",
+                    x=final_x,
+                    y=start_y,
+                    button=cdp_input.MouseButton.LEFT,
+                    click_count=1,
+                )
+            )
+        except _CDP_OPERATION_ERRORS as e:
+            logger.warning("Babelio slider drag failed: %s", type(e).__name__)
+            return False
+
+        await asyncio.sleep(4)
+        try:
+            if not await page.evaluate(_BABELIO_HAS_SLIDER_JS):
+                logger.info("Babelio slider solved on attempt %d", attempt + 1)
+                return True
+        except _CDP_OPERATION_ERRORS:
+            return False
+    logger.warning("Babelio slider still displayed after 3 drags")
+    return False
+
+
 async def _get(url: str, driver: Any, cancel_flag: Event | None = None) -> str:
     """Fetch URL with Cloudflare bypass using a CDP browser."""
     _check_cancellation(cancel_flag, "Bypass cancelled before starting")
@@ -980,6 +1073,11 @@ async def _get(url: str, driver: Any, cancel_flag: Event | None = None) -> str:
         await page.wait()
 
     _check_cancellation(cancel_flag, "Bypass cancelled after page load")
+
+    if await _solve_babelio_slider(page, url):
+        await page.reload(ignore_cache=True)
+        with suppress(Exception):
+            await page.wait()
 
     try:
         current_url = await page.get_current_url()
@@ -1498,6 +1596,11 @@ async def _post(
     page = await driver.get(origin)
     with suppress(Exception):
         await page.wait()
+
+    if await _solve_babelio_slider(page, url):
+        await page.reload(ignore_cache=True)
+        with suppress(Exception):
+            await page.wait()
 
     _check_cancellation(cancel_flag, "Bypass cancelled after page load")
 
