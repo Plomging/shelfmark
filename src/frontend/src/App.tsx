@@ -41,7 +41,6 @@ import { useRequests } from './hooks/useRequests';
 import { useSearch } from './hooks/useSearch';
 import { primeSettingsCache } from './hooks/useSettings';
 import { useToast } from './hooks/useToast';
-import { mergeMetadataBook } from './utils/bookTransformers';
 import { useExternalHashChange, useSyncUrlSearchHash, useUrlSearch } from './hooks/useUrlSearch';
 import { primeUsersCache } from './hooks/useUsersFetch';
 import { LoginPage } from './pages/LoginPage';
@@ -86,6 +85,7 @@ import { buildLoginRedirectPath, getReturnToFromSearch } from './utils/authRedir
 import { withBasePath } from './utils/basePath';
 import { emitBookTargetChange } from './utils/bookTargetEvents';
 import { bookSupportsTargets } from './utils/bookTargetLoader';
+import { mergeMetadataBook } from './utils/bookTransformers';
 import { buildSearchQuery } from './utils/buildSearchQuery';
 import { wasDownloadQueuedAfterResponseError } from './utils/downloadRecovery';
 import { getDynamicOptionGroup } from './utils/dynamicFieldOptions';
@@ -1658,12 +1658,22 @@ function App() {
   };
 
   const handleReleaseRequest = useCallback(
-    async (book: Book, release: Release, releaseContentType: ContentType): Promise<void> => {
+    async (
+      book: Book,
+      release: Release,
+      releaseContentType: ContentType,
+      options?: Pick<ReleaseDownloadOptions, 'language'>,
+    ): Promise<void> => {
       void refreshRequestPolicy();
       const normalizedContentType = toContentType(releaseContentType);
       openRequestConfirmation({
         book_data: buildMetadataBookRequestData(book, normalizedContentType),
-        release_data: buildReleaseDataFromMetadataRelease(book, release, normalizedContentType),
+        release_data: buildReleaseDataFromMetadataRelease(
+          book,
+          release,
+          normalizedContentType,
+          options?.language,
+        ),
         context: {
           source: release.source,
           content_type: normalizedContentType,
@@ -2683,6 +2693,7 @@ function App() {
               contentType={activeReleaseContentType}
               defaultLanguages={defaultLanguageCodes}
               bookLanguages={bookLanguages}
+              requiredLanguages={config?.required_languages ?? []}
               currentStatus={statusForButtonState}
               defaultReleaseSource={config?.default_release_source}
               defaultAudiobookReleaseSource={config?.default_release_source_audiobook}

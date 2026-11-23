@@ -157,7 +157,12 @@ interface ReleaseModalProps {
     contentType: ContentType,
     options?: ReleaseDownloadOptions,
   ) => Promise<void>;
-  onRequestRelease?: (book: Book, release: Release, contentType: ContentType) => Promise<void>;
+  onRequestRelease?: (
+    book: Book,
+    release: Release,
+    contentType: ContentType,
+    options?: Pick<ReleaseDownloadOptions, 'language'>,
+  ) => Promise<void>;
   onRequestBook?: (book: Book, contentType: ContentType) => Promise<void>;
   getPolicyModeForSource?: (source: string, contentType: ContentType) => RequestPolicyMode;
   supportedFormats: string[];
@@ -165,6 +170,8 @@ interface ReleaseModalProps {
   contentType: ContentType; // 'ebook' or 'audiobook'
   defaultLanguages: string[];
   bookLanguages: Language[];
+  /** Global BOOK_LANGUAGE codes; every download must select one of these. */
+  requiredLanguages: string[];
   currentStatus: StatusData;
   defaultReleaseSource?: string; // Default book tab to show (e.g., 'direct_download')
   defaultAudiobookReleaseSource?: string; // Default audiobook tab to show
@@ -403,6 +410,38 @@ const PhaseChip = ({
   );
 };
 
+// Mandatory per-release language choice. A release without a language cannot be
+// renamed with {Language}, so the download button stays blocked until one is picked.
+const ReleaseLanguageSelect = ({
+  value,
+  options,
+  onChange,
+}: {
+  value: string;
+  options: Language[];
+  onChange: (code: string) => void;
+}) => (
+  <select
+    aria-label="Release language"
+    title={value ? 'Release language' : 'Select a language before downloading'}
+    value={value}
+    onChange={(event) => onChange(event.target.value)}
+    onClick={(event) => event.stopPropagation()}
+    className={`h-7 max-w-[92px] rounded-md border px-1 text-xs transition-colors outline-none ${
+      value
+        ? 'border-zinc-300 bg-white text-zinc-700 dark:border-zinc-600 dark:bg-zinc-800 dark:text-zinc-200'
+        : 'border-amber-400 bg-amber-50 text-amber-800 dark:border-amber-500 dark:bg-amber-950/40 dark:text-amber-300'
+    }`}
+  >
+    <option value="">Lang?</option>
+    {options.map((language) => (
+      <option key={language.code} value={language.code}>
+        {language.language}
+      </option>
+    ))}
+  </select>
+);
+
 // Release row component with dynamic columns
 const ReleaseRow = ({
   release,
@@ -417,6 +456,9 @@ const ReleaseRow = ({
   selectionMode = false,
   isSelected = false,
   onSelect,
+  languageValue,
+  languageOptions,
+  onLanguageChange,
 }: {
   release: Release;
   index: number;
@@ -430,6 +472,9 @@ const ReleaseRow = ({
   selectionMode?: boolean;
   isSelected?: boolean;
   onSelect?: () => void;
+  languageValue: string;
+  languageOptions: Language[];
+  onLanguageChange: (code: string) => void;
 }) => {
   const author = toStringValue(release.extra?.author);
 
@@ -516,13 +561,20 @@ const ReleaseRow = ({
         {selectionMode ? (
           <RadioIndicator selected={isSelected} />
         ) : (
-          <BookDownloadButton
-            buttonState={buttonState}
-            onDownload={onDownload}
-            variant="icon"
-            size="sm"
-            ariaLabel={`${buttonState.text} ${release.title}`}
-          />
+          <div className="flex items-center gap-1.5">
+            <ReleaseLanguageSelect
+              value={languageValue}
+              options={languageOptions}
+              onChange={onLanguageChange}
+            />
+            <BookDownloadButton
+              buttonState={buttonState}
+              onDownload={onDownload}
+              variant="icon"
+              size="sm"
+              ariaLabel={`${buttonState.text} ${release.title}`}
+            />
+          </div>
         )}
       </div>
 
@@ -609,13 +661,20 @@ const ReleaseRow = ({
         {selectionMode ? (
           <RadioIndicator selected={isSelected} />
         ) : (
-          <BookDownloadButton
-            buttonState={buttonState}
-            onDownload={onDownload}
-            variant="icon"
-            size="sm"
-            ariaLabel={`${buttonState.text} ${release.title}`}
-          />
+          <div className="flex items-center gap-1.5">
+            <ReleaseLanguageSelect
+              value={languageValue}
+              options={languageOptions}
+              onChange={onLanguageChange}
+            />
+            <BookDownloadButton
+              buttonState={buttonState}
+              onDownload={onDownload}
+              variant="icon"
+              size="sm"
+              ariaLabel={`${buttonState.text} ${release.title}`}
+            />
+          </div>
         )}
       </div>
     </div>
@@ -764,6 +823,7 @@ const ReleaseModalSession = ({
   contentType,
   defaultLanguages,
   bookLanguages,
+  requiredLanguages,
   currentStatus,
   defaultReleaseSource,
   defaultAudiobookReleaseSource,
@@ -781,6 +841,43 @@ const ReleaseModalSession = ({
     contentType === 'audiobook' && supportedAudiobookFormats.length > 0
       ? supportedAudiobookFormats
       : supportedFormats;
+
+  // The global BOOK_LANGUAGE drives the mandatory per-row picker. The backend
+  // widens an empty/"all" setting to every supported language, so normally the
+  // list is already resolved; the fallback keeps the picker usable if config is stale.
+  const allowedLanguages = useMemo(() => {
+    const allowed = new Set(requiredLanguages.map((code) => code.toLowerCase()));
+    const picks = bookLanguages.filter((language) => allowed.has(language.code.toLowerCase()));
+    return picks.length > 0 ? picks : bookLanguages;
+  }, [requiredLanguages, bookLanguages]);
+
+  // Only explicit user choices live here; a source-detected language is derived
+  // on the fly so it shows as preselected without being written into state.
+  const [releaseLanguageSelections, setReleaseLanguageSelections] = useState<
+    Record<string, string>
+  >({});
+  const releaseLanguageKey = useCallback(
+    (release: Release) => `${release.source}:${release.source_id}`,
+    [],
+  );
+  const languageForRelease = useCallback(
+    (release: Release): string => {
+      const chosen = releaseLanguageSelections[releaseLanguageKey(release)];
+      if (chosen) {
+        return chosen;
+      }
+      const detected = release.language?.trim().toLowerCase();
+      if (!detected) {
+        return '';
+      }
+      const normalized = buildLanguageNormalizer(bookLanguages).get(detected) ?? detected;
+      return allowedLanguages.some((lang) => lang.code.toLowerCase() === normalized)
+        ? normalized
+        : '';
+    },
+    [bookLanguages, allowedLanguages, releaseLanguageKey, releaseLanguageSelections],
+  );
+
   const [isRequestingBook, setIsRequestingBook] = useState(false);
   const [selectedRelease, setSelectedRelease] = useState<Release | null>(null);
   // Multi-book packs: `multiBook` is the manual header toggle (heuristic split for
@@ -790,6 +887,7 @@ const ReleaseModalSession = ({
     release: Release;
     plan: PackPlan;
     books: PackBook[];
+    language: string;
   } | null>(null);
   const [packSubmitting, setPackSubmitting] = useState(false);
   // Format picker: `chooseFormats` is the header toggle; `formatReview` holds an inspected
@@ -798,6 +896,7 @@ const ReleaseModalSession = ({
   const [formatReview, setFormatReview] = useState<{
     release: Release;
     groups: FormatGroup[];
+    language: string;
   } | null>(null);
   const isCombinedMode = combinedMode != null;
   const combinedPhase = combinedMode?.phase ?? null;
@@ -1220,6 +1319,11 @@ const ReleaseModalSession = ({
       if (currentStatus.queued && currentStatus.queued[releaseId]) {
         return { text: 'Queued', state: 'queued' };
       }
+      // A language is mandatory for every actionable release: without it the
+      // {Language} naming variable and the download history entry stay empty.
+      if (!languageForRelease(release) && (mode === 'download' || mode === 'request_release')) {
+        return { text: 'Select language', state: 'blocked' };
+      }
       if (mode === 'request_release') {
         return { text: 'Request', state: 'download' };
       }
@@ -1228,7 +1332,7 @@ const ReleaseModalSession = ({
       }
       return { text: 'Download', state: 'download' };
     },
-    [currentStatus, getReleaseActionMode],
+    [currentStatus, getReleaseActionMode, languageForRelease],
   );
 
   // Handle row action based on resolved policy mode.
@@ -1238,13 +1342,21 @@ const ReleaseModalSession = ({
         return;
       }
 
-      // In combined mode, clicking a row selects it (don't download)
+      const releaseLanguage = languageForRelease(release);
+      if (!releaseLanguage) {
+        onShowToast?.('Select a language for this release first', 'error');
+        return;
+      }
+      const releaseWithLanguage: Release = { ...release, language: releaseLanguage };
+
+      // In combined mode, clicking a row selects it (don't download). Carry the
+      // chosen language on the staged release so the final action keeps it.
       if (isCombinedMode) {
         const mode = getReleaseActionMode(release);
         if (mode === 'blocked' || mode === 'request_book') {
           return;
         }
-        setSelectedRelease(release);
+        setSelectedRelease(releaseWithLanguage);
         return;
       }
 
@@ -1258,7 +1370,9 @@ const ReleaseModalSession = ({
         let reason: string | null = null;
         try {
           const inspection = await inspectRelease(
-            buildReleaseDownloadPayload(book, release, contentType),
+            buildReleaseDownloadPayload(book, release, contentType, {
+              language: releaseLanguage,
+            }),
           );
           inspected = inspection.inspected;
           plan = inspection.plan;
@@ -1268,7 +1382,7 @@ const ReleaseModalSession = ({
           console.error('Release inspection failed:', error);
         }
         if (inspected && plan?.is_pack) {
-          setPackReview({ release, plan, books: plan.books });
+          setPackReview({ release, plan, books: plan.books, language: releaseLanguage });
           return;
         }
         if (inspected && chooseFormats && plan) {
@@ -1277,7 +1391,7 @@ const ReleaseModalSession = ({
             new Set(plan.books.flatMap((planBook) => planBook.files)),
           );
           if (groups.length > 1) {
-            setFormatReview({ release, groups });
+            setFormatReview({ release, groups, language: releaseLanguage });
             return;
           }
         }
@@ -1291,13 +1405,16 @@ const ReleaseModalSession = ({
             }. If it contains several books, enable the multi-book pack toggle.`,
           );
         }
-        await onDownload(book, release, contentType, multiBook ? { multiBook: true } : {});
+        await onDownload(book, release, contentType, {
+          language: releaseLanguage,
+          ...(multiBook ? { multiBook: true } : {}),
+        });
         handleClose();
         return;
       }
       if (mode === 'request_release') {
         if (onRequestRelease) {
-          await onRequestRelease(book, release, contentType);
+          await onRequestRelease(book, release, contentType, { language: releaseLanguage });
           handleClose();
         }
       }
@@ -1312,6 +1429,8 @@ const ReleaseModalSession = ({
       handleClose,
       multiBook,
       chooseFormats,
+      languageForRelease,
+      onShowToast,
     ],
   );
 
@@ -1322,7 +1441,10 @@ const ReleaseModalSession = ({
       }
       setPackSubmitting(true);
       try {
-        await onDownload(book, formatReview.release, contentType, { ignoredFiles });
+        await onDownload(book, formatReview.release, contentType, {
+          language: formatReview.language,
+          ignoredFiles,
+        });
         handleClose();
       } finally {
         setPackSubmitting(false);
@@ -1343,7 +1465,14 @@ const ReleaseModalSession = ({
           book,
           packReview.release,
           contentType,
-          books ? { multiBook: true, bookPlan: toBookPlanPayload(books), ignoredFiles } : {},
+          books
+            ? {
+                language: packReview.language,
+                multiBook: true,
+                bookPlan: toBookPlanPayload(books),
+                ignoredFiles,
+              }
+            : { language: packReview.language },
         );
         handleClose();
       } finally {
@@ -2450,7 +2579,29 @@ const ReleaseModalSession = ({
                           isSelected={
                             isCombinedMode && selectedRelease?.source_id === release.source_id
                           }
-                          onSelect={isCombinedMode ? () => setSelectedRelease(release) : undefined}
+                          onSelect={
+                            isCombinedMode
+                              ? () => {
+                                  const language = languageForRelease(release);
+                                  if (!language) {
+                                    onShowToast?.(
+                                      'Select a language for this release first',
+                                      'error',
+                                    );
+                                    return;
+                                  }
+                                  setSelectedRelease({ ...release, language });
+                                }
+                              : undefined
+                          }
+                          languageValue={languageForRelease(release)}
+                          languageOptions={allowedLanguages}
+                          onLanguageChange={(code) =>
+                            setReleaseLanguageSelections((previous) => ({
+                              ...previous,
+                              [releaseLanguageKey(release)]: code,
+                            }))
+                          }
                         />
                       ))}
                     </div>

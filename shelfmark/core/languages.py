@@ -136,3 +136,35 @@ def known_language_codes() -> frozenset[str]:
     """Every ISO 639-1 code the bundled language data defines."""
     _, code_to_name = _load()
     return frozenset(code_to_name)
+
+
+def allowed_download_languages() -> list[str]:
+    """Codes a user may pick when downloading a release.
+
+    This follows the *global* BOOK_LANGUAGE — the platform-wide setting — not a
+    per-user search default. An empty setting, or the explicit ``all`` value,
+    means "no restriction", so every supported code is returned. Callers use
+    the result both for the per-release language picker and for the fallback
+    applied by auto-download when a release carries no language metadata.
+    """
+    from shelfmark.core.config import config
+
+    raw = config.get("BOOK_LANGUAGE", None)
+    if isinstance(raw, str):
+        # Some deployments keep the old comma-separated string spelling.
+        values: list[object] = list(raw.split(","))
+    elif isinstance(raw, (list, tuple, set, frozenset)):
+        values = list(raw)
+    else:
+        values = []
+
+    codes: list[str] = []
+    for value in values:
+        text = str(value).strip() if value is not None else ""
+        if not text or text.casefold() == "all":
+            continue
+        code = normalize_language(text)
+        if code is not None and code not in codes:
+            codes.append(code)
+
+    return codes or [entry["code"] for entry in supported_book_languages()]

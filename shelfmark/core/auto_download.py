@@ -28,6 +28,7 @@ from typing import TYPE_CHECKING, Any
 
 from shelfmark.core import search_deadline
 from shelfmark.core.config import config as app_config
+from shelfmark.core.languages import allowed_download_languages, normalize_language
 from shelfmark.core.logger import setup_logger
 from shelfmark.core.models import QueueStatus
 from shelfmark.core.release_search import search_source_releases
@@ -412,6 +413,22 @@ def _wanted_languages(user_id: int | None) -> list[str] | None:
     except Exception:  # noqa: BLE001 - a settings problem must not turn the filter off
         logger.warning("auto-download: could not read the default languages, assuming English")
         return ["en"]
+
+
+def _required_download_language(release: Release, allowed: list[str]) -> str | None:
+    """Language to record for an auto-downloaded release; None means skip it.
+
+    Auto-download has no user to ask, so the platform-wide allowed list is the
+    only way to honour the mandatory language. A language already reported by
+    the source wins when it is allowed; with no reported language, a single
+    allowed code is unambiguous and is used. With several allowed codes there
+    is no defensible guess, so the release is left for a manual decision.
+    """
+    if release.language:
+        code = normalize_language(release.language)
+        if code is not None:
+            return code if code in allowed else None
+    return allowed[0] if len(allowed) == 1 else None
 
 
 def _mostly_non_latin(text: str) -> bool:
@@ -854,7 +871,13 @@ def pick_best_release(releases: list[Release], content_type: str = "audiobook") 
     return max(releases, key=lambda release: _release_sort_key(release, content_type))
 
 
-def build_release_data(release: Release, book: BookMetadata, content_type: str) -> dict[str, Any]:
+def build_release_data(
+    release: Release,
+    book: BookMetadata,
+    content_type: str,
+    *,
+    language_override: str | None = None,
+) -> dict[str, Any]:
     """Build a queue_release-compatible payload from a chosen Release."""
     author = book.search_author or (book.authors[0] if book.authors else None)
     extra = release.extra if isinstance(release.extra, dict) else {}
@@ -876,7 +899,7 @@ def build_release_data(release: Release, book: BookMetadata, content_type: str) 
         "protocol": release.protocol.value if release.protocol else None,
         "indexer": release.indexer,
         "seeders": release.seeders,
-        "language": release.language,
+        "language": language_override or release.language,
         "content_type": release.content_type or content_type,
         "series_name": book.series_name,
         "series_position": book.series_position,
@@ -1588,6 +1611,7 @@ def auto_download_request(
     audiobook_formats = _audiobook_formats()
     ebook_formats = _ebook_formats()
     languages = _wanted_languages(coerce_int(request_row.get("user_id"), 0) or None)
+    allowed_languages = allowed_download_languages()
     # Releases that already failed for this request, so a retry does not pick the same one. Only
     # those whose failure is recent: an older one is given another chance (None keeps all).
     remembered = _failed_release_keys(book_data)
@@ -1627,6 +1651,7 @@ def auto_download_request(
                 release
                 for release in releases
                 if strict_match(release, searched_book, **match_kwargs)
+                and _required_download_language(release, allowed_languages) is not None
             ]
             chosen = None
             release_data: dict[str, Any] = {}
@@ -1639,7 +1664,12 @@ def auto_download_request(
             for index, candidate in enumerate(ranked):
                 if index >= MAX_PACK_CHECKS:
                     break  # the best few were all packs; don't queue an uninspected tail
-                data = build_release_data(candidate, searched_book, content_type)
+                data = build_release_data(
+                    candidate,
+                    searched_book,
+                    content_type,
+                    language_override=_required_download_language(candidate, allowed_languages),
+                )
                 is_pack, single_file = _inspect_candidate(data)
                 if is_pack:
                     logger.info("auto-download: skipping multi-book pack %s", candidate.title)

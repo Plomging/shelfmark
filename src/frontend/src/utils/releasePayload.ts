@@ -2,6 +2,8 @@ import type { DownloadReleasePayload } from '../services/api';
 import type { Book, ContentType, PackBook, Release } from '../types';
 
 export interface ReleaseDownloadOptions {
+  /** Language chosen for this release; overrides the source-reported language. */
+  language?: string;
   /** Ask post-processing to split the release into one book per subfolder/file. */
   multiBook?: boolean;
   /** The split the user approved in the pack review panel. */
@@ -73,9 +75,10 @@ export function buildReleaseDownloadPayload(
           series_count: book.series_count,
           rating: book.rating,
         },
-    // From the release, never the book: book.language is the provider's
-    // canonical edition, which would mislabel a translated release.
-    language: release.language ?? undefined,
+    // The user's explicit choice wins. Otherwise use the release's language,
+    // never the book's: book.language is the provider's canonical edition,
+    // which would mislabel a translated release.
+    language: options.language ?? release.language ?? undefined,
   };
 
   if (options.multiBook || options.bookPlan) {

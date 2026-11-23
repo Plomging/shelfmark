@@ -301,6 +301,8 @@ export interface AppConfig {
   build_version: string;
   release_version: string;
   book_languages: Language[];
+  /** Global BOOK_LANGUAGE codes a user must pick from when downloading a release. */
+  required_languages: string[];
   default_language: string[];
   default_content_type: ContentType;
   supported_formats: string[];

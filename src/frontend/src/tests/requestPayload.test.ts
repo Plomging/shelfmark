@@ -151,6 +151,17 @@ describe('requestPayload utilities', () => {
     expect(data.language).toBe('sv');
   });
 
+  it('lets the mandatory language choice override the release language', () => {
+    const data = buildReleaseDataFromMetadataRelease(
+      baseBook,
+      { ...baseRelease, language: 'sv' },
+      'ebook',
+      'fr',
+    );
+
+    expect(data.language).toBe('fr');
+  });
+
   it('leaves language undefined when the release has none', () => {
     const data = buildReleaseDataFromMetadataRelease(baseBook, baseRelease, 'ebook');
 

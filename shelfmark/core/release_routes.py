@@ -10,6 +10,7 @@ from flask import jsonify, request, session
 
 from shelfmark.core import search_deadline
 from shelfmark.core.config import config as app_config
+from shelfmark.core.languages import allowed_download_languages, normalize_language
 from shelfmark.core.logger import setup_logger
 from shelfmark.core.models import SearchFilters
 from shelfmark.core.release_inspect_routes import register_release_inspect_routes
@@ -414,6 +415,16 @@ def register_release_routes(
                 return jsonify({"error": "source_id is required"}), 400
             if "source" not in data:
                 return jsonify({"error": "source is required"}), 400
+
+            # The UI makes the language choice mandatory, but other clients may
+            # still omit it. Accept that for compatibility; when a value is sent,
+            # keep only an allowed, resolvable code so it cannot mislabel a file.
+            if data.get("language"):
+                language = normalize_language(data["language"])
+                if language is None or language not in allowed_download_languages():
+                    return jsonify({"error": "Unsupported download language"}), 400
+                data = dict(data)
+                data["language"] = language
 
             source = data["source"]
             resolved_content_type, inferred_content_type = _resolve_release_content_type(

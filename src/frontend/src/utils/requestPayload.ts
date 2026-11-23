@@ -64,6 +64,7 @@ export const buildReleaseDataFromMetadataRelease = (
   book: Book,
   release: Release,
   contentType: ContentType,
+  languageOverride?: string,
 ) => {
   const isSourceBackedReleaseContext =
     Boolean(book.provider) &&
@@ -90,7 +91,7 @@ export const buildReleaseDataFromMetadataRelease = (
     series_position: book.series_position,
     series_count: book.series_count,
     subtitle: book.subtitle,
-    language: release.language,
+    language: languageOverride ?? release.language,
     ...(isSourceBackedReleaseContext ? { search_mode: 'direct' as const } : {}),
   };
 };
