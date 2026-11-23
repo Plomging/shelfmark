@@ -997,7 +997,7 @@ async def _solve_babelio_slider(page: Any, url: str) -> bool:
     """
     if not _plain_http_blocked(url):
         return False
-    for attempt in range(3):
+    for attempt in range(6):
         try:
             info = await page.evaluate(_BABELIO_SLIDER_INFO_JS)
         except _CDP_OPERATION_ERRORS:
@@ -1008,15 +1008,22 @@ async def _solve_babelio_slider(page: Any, url: str) -> bool:
         distance = int(info["distance"])
         start_x = float(info["thumbX"])
         start_y = float(info["thumbY"])
-        logger.info("Babelio slider: drag %dpx (attempt %d/3)", distance, attempt + 1)
+        logger.info("Babelio slider: drag %dpx (attempt %d/6)", distance, attempt + 1)
         try:
+            # Move the pointer onto the thumb first: a raw press at the
+            # coordinates without a prior move does not fire pointerenter on
+            # every layout, so the site never starts tracking the gesture.
+            await page.send(cdp_input.dispatch_mouse_event("mouseMoved", x=start_x, y=start_y))
+            await asyncio.sleep(0.05)
             await page.send(
                 cdp_input.dispatch_mouse_event(
                     "mousePressed",
                     x=start_x,
                     y=start_y,
                     button=cdp_input.MouseButton.LEFT,
+                    buttons=1,
                     click_count=1,
+                    force=0.5,
                 )
             )
             overshoot = _RNG.uniform(3, 8) * _RNG.choice((-1, 1))
@@ -1030,19 +1037,34 @@ async def _solve_babelio_slider(page: Any, url: str) -> bool:
                         "mouseMoved",
                         x=start_x + (target_x - start_x) * eased,
                         y=start_y + _RNG.uniform(-1.5, 1.5),
+                        button=cdp_input.MouseButton.LEFT,
+                        buttons=1,
+                        force=0.5,
                     )
                 )
                 await asyncio.sleep(_RNG.uniform(0.008, 0.035))
             final_x = start_x + distance + _RNG.uniform(-2, 2)
             for _ in range(2):
-                await page.send(cdp_input.dispatch_mouse_event("mouseMoved", x=final_x, y=start_y))
+                await page.send(
+                    cdp_input.dispatch_mouse_event(
+                        "mouseMoved",
+                        x=final_x,
+                        y=start_y,
+                        button=cdp_input.MouseButton.LEFT,
+                        buttons=1,
+                        force=0.5,
+                    )
+                )
+            await asyncio.sleep(0.2)
             await page.send(
                 cdp_input.dispatch_mouse_event(
                     "mouseReleased",
                     x=final_x,
                     y=start_y,
                     button=cdp_input.MouseButton.LEFT,
+                    buttons=0,
                     click_count=1,
+                    force=0.0,
                 )
             )
         except _CDP_OPERATION_ERRORS as e:
@@ -1056,7 +1078,7 @@ async def _solve_babelio_slider(page: Any, url: str) -> bool:
                 return True
         except _CDP_OPERATION_ERRORS:
             return False
-    logger.warning("Babelio slider still displayed after 3 drags")
+    logger.warning("Babelio slider still displayed after 6 drags")
     return False
 
 

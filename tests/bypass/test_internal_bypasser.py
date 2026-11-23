@@ -1057,12 +1057,17 @@ def test_babelio_slider_solves_the_challenge_with_real_mouse_events(monkeypatch)
         internal_bypasser._solve_babelio_slider(page, "https://www.babelio.com/livres/x/1")
     )
 
-    assert events[0]["type"] == "mousePressed"
-    assert events[-1]["type"] == "mouseReleased"
-    assert sum(e["type"] == "mouseMoved" for e in events) >= 25
-    # The drag starts on the thumb and lands near start + the site's distance
-    assert events[0]["x"] == 395.0
-    assert abs(events[-1]["x"] - (395.0 + 147)) <= 10
+    # Pointer is moved onto the thumb first, then the button is held for the
+    # whole drag (buttons=1) exactly as SeleniumBase's own drag does
+    assert events[0]["type"] == "mouseMoved"
+    press = next(e for e in events if e["type"] == "mousePressed")
+    release = next(e for e in events if e["type"] == "mouseReleased")
+    assert press["buttons"] == 1 and press["x"] == 395.0
+    moves = events[events.index(press) + 1 :]
+    assert all(e["buttons"] == 1 for e in moves if e["type"] == "mouseMoved")
+    assert release["buttons"] == 0
+    assert sum(e["type"] == "mouseMoved" for e in events) >= 26
+    assert abs(release["x"] - (395.0 + 147)) <= 10
     assert len(evaluates) == 2  # info probe + challenge check
 
 
