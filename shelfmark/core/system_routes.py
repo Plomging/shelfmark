@@ -16,6 +16,7 @@ from shelfmark.config.env import BUILD_VERSION, RELEASE_VERSION
 from shelfmark.config.settings import _SUPPORTED_BOOK_LANGUAGE
 from shelfmark.core import search_deadline
 from shelfmark.core.config import config as app_config
+from shelfmark.core.languages import allowed_download_languages
 from shelfmark.core.logger import setup_logger
 from shelfmark.core.request_helpers import normalize_optional_text
 from shelfmark.download import orchestrator as backend
@@ -196,6 +197,7 @@ def register_system_routes(
                 "build_version": BUILD_VERSION,
                 "release_version": RELEASE_VERSION,
                 "book_languages": _SUPPORTED_BOOK_LANGUAGE,
+                "required_languages": allowed_download_languages(),
                 "default_language": app_config.get("BOOK_LANGUAGE", ["en"], user_id=db_user_id),
                 "default_content_type": app_config.get(
                     "DEFAULT_CONTENT_TYPE", "ebook", user_id=db_user_id

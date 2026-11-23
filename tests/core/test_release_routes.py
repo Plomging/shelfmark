@@ -73,6 +73,60 @@ def _download(client, main_module, payload: dict) -> tuple[object, dict]:
     return resp, captured
 
 
+class TestDownloadLanguageValidation:
+    def test_allowed_language_is_normalized_before_queueing(self, client, main_module):
+        with patch(
+            "shelfmark.core.release_routes.allowed_download_languages",
+            return_value=["en", "fr"],
+        ):
+            resp, captured = _download(
+                client,
+                main_module,
+                {
+                    "source": "prowlarr",
+                    "source_id": "lang-1",
+                    "title": "A book",
+                    "language": "French",
+                },
+            )
+
+        assert resp.status_code == 200
+        assert captured["release_data"]["language"] == "fr"
+
+    def test_disallowed_language_is_rejected(self, client, main_module):
+        with patch(
+            "shelfmark.core.release_routes.allowed_download_languages",
+            return_value=["en", "fr"],
+        ):
+            resp, captured = _download(
+                client,
+                main_module,
+                {
+                    "source": "prowlarr",
+                    "source_id": "lang-2",
+                    "title": "A book",
+                    "language": "de",
+                },
+            )
+
+        assert resp.status_code == 400
+        assert captured == {}
+
+    def test_omitted_language_stays_accepted_for_existing_clients(self, client, main_module):
+        with patch(
+            "shelfmark.core.release_routes.allowed_download_languages",
+            return_value=["en", "fr"],
+        ):
+            resp, captured = _download(
+                client,
+                main_module,
+                {"source": "prowlarr", "source_id": "lang-3", "title": "A book"},
+            )
+
+        assert resp.status_code == 200
+        assert "language" not in captured["release_data"]
+
+
 class TestDownloadContentType:
     def test_audiobook_torznab_category_marks_the_release_as_audiobook(self, client, main_module):
         payload = {

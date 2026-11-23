@@ -43,6 +43,18 @@ describe('buildReleaseDownloadPayload', () => {
     expect(payload.book_plan).toBeUndefined();
   });
 
+  it('lets the mandatory language choice override the release language', () => {
+    const payload = buildReleaseDownloadPayload(
+      book,
+      { ...release, language: undefined },
+      'audiobook',
+      {
+        language: 'fr',
+      },
+    );
+    expect(payload.language).toBe('fr');
+  });
+
   it('uses the release title and author for manual books', () => {
     const manual: Book = { ...book, provider: 'manual', title: 'ignored' };
     const withAuthor = { ...release, extra: { author: 'Release Author' } };
